@@ -211,7 +211,7 @@ uint8_t *pcan_record_buffer_request( PCAN_RECORD_BUFFER_EX *prec, uint16_t size 
   if( unused < size )
   {
     /* align data to next slot bound */
-    uint8_t next = ( prec->pos + (BLOCK_SIZE-1) ) & (~((BLOCK_SIZE-1)));
+    uint16_t next = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1)));
     if( (next+HEADER_SIZE) >= PCAN_MAX_RECORD_SIZE )
       return 0;
     memset( &prec->buffer[next], 0x00, BLOCK_SIZE );

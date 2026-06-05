@@ -168,6 +168,7 @@ uint16_t pcan_usb_send_command_buffer( const void *p, uint16_t size )
   
   if( USBD_LL_Transmit( pdev, PCAN_USB_EP_CMDIN, (void*)p, size ) == USBD_OK )
     return size;
+  pdev->ep_in[PCAN_USB_EP_CMDIN & 0xFU].total_length = 0;
   return 0;
 }
 
@@ -181,6 +182,7 @@ uint16_t pcan_usb_send_data_buffer( const void *p, uint16_t size )
   
   if( USBD_LL_Transmit( pdev, PCAN_USB_EP_MSGIN, (void*)p, size ) == USBD_OK )
     return size;
+  pdev->ep_in[PCAN_USB_EP_MSGIN & 0xFU].total_length = 0;
   return 0;
 }
 

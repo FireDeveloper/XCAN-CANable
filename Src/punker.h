@@ -6,10 +6,10 @@
                             ( ((uint8_t*)(ptr))[1] << 8 ) |\
                             ( ((uint8_t*)(ptr))[0] ) )
 #define unpack_u32( ptr ) (\
-                            ( ((uint8_t*)ptr)[3] << 24 ) |\
-                            ( ((uint8_t*)ptr)[2] << 16 ) |\
-                            ( ((uint8_t*)ptr)[1] << 8 ) |\
-                            ( ((uint8_t*)ptr)[0] ) )
+                            ( (uint32_t)((uint8_t*)ptr)[3] << 24 ) |\
+                            ( (uint32_t)((uint8_t*)ptr)[2] << 16 ) |\
+                            ( (uint32_t)((uint8_t*)ptr)[1] << 8 ) |\
+                            ( (uint32_t)((uint8_t*)ptr)[0] ) )
 
 #define unpack_float( ptr ) *(float*)(uint32_t[]){ unpack_u32( ptr ) }
 
@@ -20,9 +20,9 @@
                                 }while(0)
                                   
 #define pack_u24( ptr, data ) do{ \
-    (uint8_t*)(ptr)[0] = (data)& 0xFF; \
-    (uint8_t*)(ptr)[1] = ( ( data ) >> 8 ) & 0xFF; \
-    (uint8_t*)(ptr)[2] = ( ( data ) >> 16 ) & 0xFF; \
+    ((uint8_t*)(ptr))[0] = (data)& 0xFF; \
+    ((uint8_t*)(ptr))[1] = ( ( data ) >> 8 ) & 0xFF; \
+    ((uint8_t*)(ptr))[2] = ( ( data ) >> 16 ) & 0xFF; \
                                 }while( 0 )
                                   
 #define pack_u32( _xptr, _xdata ) do{ \
