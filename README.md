@@ -1,6 +1,6 @@
 # XCAN firmware for the DykbRadio CANable V1.0
 
-[![build](https://github.com/FireDeveloper/pcan_cantact/actions/workflows/firmware_build.yml/badge.svg?branch=develop)](https://github.com/FireDeveloper/pcan_cantact/actions/workflows/firmware_build.yml?query=branch%3Adevelop)
+[![build](https://github.com/FireDeveloper/XCAN-CANable/actions/workflows/firmware_build.yml/badge.svg?branch=develop)](https://github.com/FireDeveloper/XCAN-CANable/actions/workflows/firmware_build.yml?query=branch%3Adevelop)
 
 USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It implements the CAN-USB protocol, so the board runs with the Windows CAN Driver and the Linux CAN Driver for that adapter family. It started as a fork of [moonglow/pcan_cantact](https://github.com/moonglow/pcan_cantact) and is now built around this one board: interrupt-driven CAN, transmission at the full bus rate, flow control in both directions, and complete bus state and error reporting.
 
