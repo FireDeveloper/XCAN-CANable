@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-/* pcan-usb parameter get an set function */
+/* CAN-USB parameter get and set functions */
 #pragma pack(push, 1)
 typedef struct 
 {
@@ -19,7 +19,7 @@ PCAN_USB_PARAM;
 #define PCAN_USB_SET      0x02
 #define PCAN_USB_EX3      0x03
 
-/* PCAN-USB commands */
+/* CAN-USB commands */
 #define PCAN_USB_CMD_BITRATE	1
 #define PCAN_USB_CMD_CLOCK	  2
 #define PCAN_USB_CMD_BUS	    3
@@ -37,23 +37,23 @@ PCAN_USB_PARAM;
 /* PCAN_USB_CMD_BUS PCAN_USB_SET extension: */
 #define PCAN_USB_SET_SILENT_MODE	3
 
-/* PCAN-USB rx/tx buffers size */
+/* CAN-USB rx/tx buffers size */
 #define PCAN_USB_RX_BUFFER_SIZE    64
 #define PCAN_USB_TX_BUFFER_SIZE    64
 
 #define PCAN_USB_MSG_HEADER_LEN    2
 
-/* PCAN-USB adapter internal clock (MHz) */
+/* CAN-USB adapter internal clock (MHz) */
 #define PCAN_USB_CRYSTAL_HZ    16000000
 
-/* PCAN-USB USB message record status/len field */
+/* CAN-USB message record status/len field */
 #define PCAN_USB_STATUSLEN_TIMESTAMP    (1 << 7)
 #define PCAN_USB_STATUSLEN_INTERNAL     (1 << 6)
 #define PCAN_USB_STATUSLEN_EXT_ID       (1 << 5)
 #define PCAN_USB_STATUSLEN_RTR          (1 << 4)
 #define PCAN_USB_STATUSLEN_DLC          (0xf)
 
-/* PCAN-USB error flags */
+/* CAN-USB error flags */
 #define PCAN_USB_ERROR_TXFULL      0x01
 #define PCAN_USB_ERROR_RXQOVR      0x02
 #define PCAN_USB_ERROR_BUS_LIGHT   0x04
@@ -87,7 +87,7 @@ PCAN_USB_PARAM;
 #define PCAN_USB_TS_DIV_SHIFTER    20
 #define PCAN_USB_TS_US_PER_TICK    44739243
 
-/* PCAN-USB messages record types */
+/* CAN-USB messages record types */
 #define PCAN_USB_REC_ERROR     1
 #define PCAN_USB_REC_ANALOG    2
 #define PCAN_USB_REC_BUSLOAD   3

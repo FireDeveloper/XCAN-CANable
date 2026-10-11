@@ -42,7 +42,7 @@ typedef struct
   uint8_t   flags;
   /* for self receive */
   uint8_t   dummy;
-  /* in pcan ticks */
+  /* in 42.666 us ticks */
   uint16_t timestamp;
 }
 can_message_t;

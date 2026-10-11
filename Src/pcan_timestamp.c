@@ -34,6 +34,6 @@ uint16_t pcan_timestamp_millis( void )
 
 uint16_t pcan_timestamp_ticks( void )
 {
-  /* 1 pcan tick => 42.666 us */
+  /* 1 tick => 42.666 us */
   return TIM3->CNT;
 }

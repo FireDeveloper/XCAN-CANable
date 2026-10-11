@@ -74,7 +74,7 @@ void pcan_can_init(void)
   g_hcan.Init.TimeSeg1 = CAN_BS1_1TQ;
   g_hcan.Init.TimeSeg2 = CAN_BS2_1TQ;
   g_hcan.Init.TimeTriggeredMode = DISABLE;
-  //? PCAN hosts restart a bus-off channel themselves; Linux cannot restart one that already recovered, which blocks its TX queue.
+  //? The host drivers restart a bus-off channel themselves; the Linux CAN Driver cannot restart one that already recovered, which blocks its TX queue.
   g_hcan.Init.AutoBusOff = DISABLE; // stay bus-off until the host restarts the channel
   g_hcan.Init.AutoWakeUp = DISABLE;
   g_hcan.Init.AutoRetransmission = ENABLE;

@@ -281,7 +281,7 @@ uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
 /**
  * @brief Close the current block when a record stamped @p ts could not carry a 1-byte timestamp the host decodes.
  * @param[in,out] prec Record buffer.
- * @param[in]     ts   Timestamp of the record about to be added, in PCAN ticks.
+ * @param[in]     ts   Timestamp of the record about to be added, in 42.666 us ticks.
  * @note Call it before pcan_record_buffer_request(); the record then opens a new block with its timestamp in full.
  */
 static void pcan_record_timestamp_guard( PCAN_RECORD_BUFFER_EX *prec, uint16_t ts )
@@ -295,7 +295,7 @@ static void pcan_record_timestamp_guard( PCAN_RECORD_BUFFER_EX *prec, uint16_t t
  * @brief Write a record's timestamp: in full for the first timestamped record of a block, as its low byte after that.
  * @param[in,out] prec Record buffer; the next 1-byte timestamp is measured from this one.
  * @param[out]    ptr  Where the timestamp goes.
- * @param[in]     ts   Timestamp in PCAN ticks.
+ * @param[in]     ts   Timestamp in 42.666 us ticks.
  * @return Bytes written, 2 or 1.
  */
 static uint8_t pcan_record_put_timestamp( PCAN_RECORD_BUFFER_EX *prec, uint8_t *ptr, uint16_t ts )
@@ -539,7 +539,7 @@ static void pcan_can_error( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_
     pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR; // the controller's RX FIFO dropped frames
   }
 
-  //- Report the bus error the way a PCAN-USB reports its SJA1000 bus error interrupt
+  //- Report the bus error the way a CAN-USB adapter reports its SJA1000 bus error interrupt
   if( !( err & CAN_ERROR_FLAG_BUS_ERR ) || !( pcan_device.can.err_mask & PCAN_USB_ERR_ECC ) )
     return; // no bus error, or the host did not ask for them
   pcan_device.can.ecc = pcan_bus_error_ecc( bus_err ); // error code capture for the record
@@ -681,7 +681,7 @@ static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
     return 0; // no room, the latched events wait for the next record
 
   //- Merge the bus state into the latched events
-  //? PCAN-USB has no error-passive bit: PCAN_USB_ERROR_BUS_HEAVY covers both warning and passive.
+  //? The CAN-USB protocol has no error-passive bit: PCAN_USB_ERROR_BUS_HEAVY covers both warning and passive.
   //? The host tells them apart by the error counters pcan_bus_event() sends.
   n = pcan_device.can.err; // events latched since the last record
   if( pcan_device.can.bus_state == CAN_BUS_STATE_OFF )
@@ -754,7 +754,7 @@ static void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
 }
 
 /**
- * @brief Report a change of the controller's bus state to the host, as a PCAN-USB reports its SJA1000 status interrupts.
+ * @brief Report a change of the controller's bus state to the host, as a CAN-USB adapter reports its SJA1000 status interrupts.
  * @param[in,out] prec Record buffer the records are appended to.
  * @note A bus event record that finds @p prec full is retried on the next call; a lost error record is repeated by the next pcan_timesync_event().
  */

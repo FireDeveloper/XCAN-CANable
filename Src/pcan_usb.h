@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-/* PCAN-USB Endpoints */
+/* CAN-USB Endpoints */
 #define PCAN_USB_EP_CMDOUT  0x01
 #define PCAN_USB_EP_CMDIN   0x81
 #define PCAN_USB_EP_MSGOUT  0x02
