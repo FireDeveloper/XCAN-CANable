@@ -42,7 +42,8 @@ void pcan_can_init( void );
 /**
  * @brief Pass the frames and echoes the CAN interrupt queued to the protocol, report latched errors, and start transmission of queued frames.
  * @note Call it from the main loop; the CAN interrupt itself only queues work, so the protocol callbacks never run in interrupt context.
- * @note The CAN interrupt loads every frame into mailbox 0; this only raises it when frames wait while the mailbox sits idle.
+ * @note The CAN interrupt loads the frames into the TX mailboxes; this only raises it when frames wait while no mailbox is loaded.
+ * @note A frame the handler refuses stays queued; while the queue is nearly full, frames that ask for an echo wait in the TX FIFO.
  */
 void pcan_can_poll( void );
 
@@ -63,7 +64,11 @@ int pcan_can_send_message( const can_message_t *msg );
  */
 uint32_t pcan_can_tx_free( void );
 
-void pcan_can_install_rx_callback( void (*cb)( can_message_t * ) );
+/**
+ * @brief Install the handler pcan_can_poll() passes each received frame and echo to.
+ * @param[in] cb Handler; returns non-zero once it took the frame, zero to keep the frame queued for the next poll.
+ */
+void pcan_can_install_rx_callback( int (*cb)( const can_message_t * ) );
 void pcan_can_install_error_callback( void (*cb)( uint8_t, uint8_t, uint8_t ) );
 
 /**

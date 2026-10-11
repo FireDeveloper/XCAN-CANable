@@ -333,10 +333,10 @@ static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
  * @brief Append a received or echoed CAN frame to the USB record buffer.
  * @param[in,out] prec Record buffer; flushed to USB first when it has no room.
  * @param[in]     msg  Frame to record; a DLC above 8 is recorded as 8.
- * @note A frame that finds no room even after a flush is dropped and latches PCAN_USB_ERROR_RXQOVR.
+ * @return 1 when the frame is taken, 0 when the buffer is full and the previous USB transfer still runs.
  * @note A frame 256 or more ticks after the previous record starts a new block, so its timestamp goes out in full.
  */
-static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t *msg )
+static uint8_t pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t *msg )
 {
   uint8_t *ptr, pos = 0;
 
@@ -349,15 +349,16 @@ static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t 
   /* wow ! too fast too furious !!! */
   if( !ptr )
   {
+    //? Refusing the frame leaves it in the CAN layer's RX ring, which also holds back frames that ask for an echo.
     if( !pcan_record_buffer_flush( prec ) )
-    {
-      pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR;
-      return;
-    }
+      return 0; // USB still sends the previous transfer; pcan_can_poll() offers the frame again
     ptr = pcan_record_buffer_request( prec, BUFFER_MINIMAL_GAP_SIZE );
     /* o_0 */
     if( !ptr )
-      return;
+    {
+      pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR; // no room even in an emptied buffer
+      return 1; // frame dropped
+    }
   }
   /* recheck dlc for abnormal frames... */
   uint8_t len = msg->dlc > 8 ? 8: msg->dlc; // data bytes on the wire, a DLC of 9-15 carries 8
@@ -439,18 +440,25 @@ static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t 
 
   /* add new record */
   pcan_record_buffer_commit( prec, pos );
+  return 1; // frame recorded
 }
 
-static void pcan_rx_message( can_message_t *msg )
+/**
+ * @brief Record a received frame or an echo for the host; pcan_can_poll() calls it for each queued frame.
+ * @param[in] msg Frame from the CAN layer.
+ * @return 1 when the frame is taken, recorded or dropped with the channel off; 0 when it has to wait for USB.
+ */
+static int pcan_rx_message( const can_message_t *msg )
 {
   if( !pcan_device.bus_active )
-    return;
+    return 1; // channel off: drop the frame
+  if( !pcan_rx_can_frame( &pcan_records, msg ) )
+    return 0; // USB buffer full: the frame stays queued
   if( ( msg->flags & CAN_FLAG_ECHO ) == 0 )
   {
     pcan_led_set_mode( LED_CH0_RX, LED_MODE_BLINK_FAST, 237 );
   }
-
-  pcan_rx_can_frame( &pcan_records, msg );
+  return 1; // recorded
 }
 
 /**
