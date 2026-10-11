@@ -94,8 +94,18 @@ PCAN_USB_PARAM;
 #define PCAN_USB_REC_TS        4
 #define PCAN_USB_REC_BUSEVT    5
 
+#define PCAN_USB_ERR_ECC       0x01 // PCAN_USB_CMD_ERR_FR mask: send a bus event record for each bus error
 #define PCAN_USB_ERR_RXERR     0x02 // PCAN_USB_CMD_ERR_FR mask: send the receive error counter
 #define PCAN_USB_ERR_TXERR     0x04 // PCAN_USB_CMD_ERR_FR mask: send the transmit error counter
+
+//? A bus event record carries the SJA1000 error code capture register: error type in bits 7-6, direction in bit 5, frame segment in bits 4-0.
+#define PCAN_USB_ECC_BIT       0x00 // error type: bit error
+#define PCAN_USB_ECC_FORM      0x40 // error type: form error
+#define PCAN_USB_ECC_STUFF     0x80 // error type: stuff error
+#define PCAN_USB_ECC_OTHER     0xC0 // error type: any other error, such as ACK or CRC
+#define PCAN_USB_ECC_RX        0x20 // direction: the error hit a frame being received
+#define PCAN_USB_ECC_SEG_CRC   0x08 // segment: CRC sequence
+#define PCAN_USB_ECC_SEG_ACK   0x19 // segment: acknowledge slot
 
 #define PCAN_USB_TX_SRR        0x01 // TX record ID word bit: echo the frame back once sent
 #define PCAN_USB_TX_AT         0x02 // TX record ID word bit: single shot, no automatic retransmission

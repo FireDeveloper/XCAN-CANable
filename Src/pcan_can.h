@@ -9,6 +9,16 @@
 #define CAN_ERROR_FLAG_BUSOFF    (1<<0)
 #define CAN_ERROR_FLAG_RX_OVF    (1<<1)
 #define CAN_ERROR_FLAG_TX_ERR    (1<<2)
+#define CAN_ERROR_FLAG_BUS_ERR   (1<<3) // a bus error; the error callback's bus_err holds the last one
+
+//? The values match bxCAN's last error code field, ESR.LEC.
+#define CAN_LEC_STUFF            (1) // stuff error
+#define CAN_LEC_FORM             (2) // form error
+#define CAN_LEC_ACK              (3) // no node acknowledged the frame
+#define CAN_LEC_BIT_RECESSIVE    (4) // sent recessive, read dominant
+#define CAN_LEC_BIT_DOMINANT     (5) // sent dominant, read recessive
+#define CAN_LEC_CRC              (6) // CRC mismatch
+#define CAN_BUS_ERR_RX           (0x80) // bus_err flag: no TX mailbox was pending, so the error hit a received frame
 
 //? The values rise with severity; pcan_bus_state_poll() compares them to tell a worsening bus from a recovering one.
 #define CAN_BUS_STATE_ACTIVE     (0) // both error counters below 96
@@ -69,7 +79,13 @@ uint32_t pcan_can_tx_free( void );
  * @param[in] cb Handler; returns non-zero once it took the frame, zero to keep the frame queued for the next poll.
  */
 void pcan_can_install_rx_callback( int (*cb)( const can_message_t * ) );
-void pcan_can_install_error_callback( void (*cb)( uint8_t, uint8_t, uint8_t ) );
+
+/**
+ * @brief Install the handler pcan_can_poll() reports the controller's error events to.
+ * @param[in] cb Handler taking the CAN_ERROR_FLAG_* events since the last poll, the last bus error, and the receive and transmit error counters.
+ * @note The bus error is a CAN_LEC_* code, with CAN_BUS_ERR_RX when no TX mailbox was pending.
+ */
+void pcan_can_install_error_callback( void (*cb)( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err ) );
 
 /**
  * @brief Join or leave the CAN bus; joining while already on restarts the channel.

@@ -47,8 +47,9 @@ static struct
   volatile uint32_t rx_head; // next slot the interrupt fills
   volatile uint32_t rx_tail; // next slot the main loop reads
   volatile uint8_t isr_err; // CAN_ERROR_FLAG_* events the interrupt latched for the main loop
+  volatile uint8_t isr_bus_err; // CAN_LEC_* of the last bus error, with CAN_BUS_ERR_RX
   int (*rx_cb)( const can_message_t * );
-  void (*can_err_cb)( uint8_t err, uint8_t rx_err, uint8_t tx_err );
+  void (*can_err_cb)( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err );
 }
 can_dev = { 0 };
 
@@ -186,7 +187,7 @@ void pcan_can_install_rx_callback( int (*cb)( const can_message_t * ) )
   can_dev.rx_cb = cb;
 }
 
-void pcan_can_install_error_callback( void (*cb)( uint8_t, uint8_t, uint8_t ) )
+void pcan_can_install_error_callback( void (*cb)( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err ) )
 {
   can_dev.can_err_cb = cb;
 }
@@ -561,6 +562,7 @@ void pcan_can_poll(void)
   //- Report the events the interrupt latched, with the controller's counters
   __disable_irq(); // fetch and clear without losing an event the interrupt adds meanwhile
   uint8_t errs = can_dev.isr_err; // events since the last poll
+  uint8_t bus_err = can_dev.isr_bus_err; // the last bus error among them
   can_dev.isr_err = 0; // start collecting again
   __enable_irq();
   if( errs && can_dev.can_err_cb )
@@ -568,7 +570,7 @@ void pcan_can_poll(void)
     can_bus_status_t status;
 
     pcan_can_get_bus_status( &status ); // read the controller's REC and TEC
-    can_dev.can_err_cb( errs, status.rx_err, status.tx_err ); // report the events with the hardware counters
+    can_dev.can_err_cb( errs, bus_err, status.rx_err, status.tx_err ); // report the events with the hardware counters
   }
 
   //- Start the mailboxes for frames queued while none was loaded
@@ -671,6 +673,20 @@ void HAL_CAN_ErrorCallback( CAN_HandleTypeDef *hcan )
   if( err & ( HAL_CAN_ERROR_RX_FOV0 | HAL_CAN_ERROR_RX_FOV1 ) )
   {
     can_dev.isr_err |= CAN_ERROR_FLAG_RX_OVF; // the hardware RX FIFO dropped a frame
+  }
+
+  //- Keep the last bus error for pcan_can_poll()
+  //? The HAL clears ESR.LEC before this callback runs, so the error type comes from its error bits, listed here in CAN_LEC_* order from 1.
+  static const uint32_t lec_errors[] = { HAL_CAN_ERROR_STF, HAL_CAN_ERROR_FOR, HAL_CAN_ERROR_ACK, HAL_CAN_ERROR_BR, HAL_CAN_ERROR_BD, HAL_CAN_ERROR_CRC };
+  uint8_t lec = 0; // CAN_LEC_* code, 0 without a bus error
+  for( uint8_t i = 0; i < sizeof( lec_errors ) / sizeof( lec_errors[0] ); ++i )
+    if( err & lec_errors[i] )
+      lec = i + 1u; // the HAL reports one error type per event
+  if( lec )
+  {
+    uint8_t receiving = ( ( hcan->Instance->TSR & CAN_TSR_TME ) == CAN_TSR_TME ); // no mailbox pending, so not the transmitter
+    can_dev.isr_bus_err = lec | ( receiving ? CAN_BUS_ERR_RX : 0 ); // overwritten by the next bus error
+    can_dev.isr_err |= CAN_ERROR_FLAG_BUS_ERR; // reported with the next poll
   }
 
   HAL_CAN_ResetError( hcan );

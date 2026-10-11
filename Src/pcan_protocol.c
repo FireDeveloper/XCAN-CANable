@@ -279,21 +279,63 @@ uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
 }
 
 /**
- * @brief Append a bus event record carrying the CAN error counters.
+ * @brief Close the current block when a record stamped @p ts could not carry a 1-byte timestamp the host decodes.
+ * @param[in,out] prec Record buffer.
+ * @param[in]     ts   Timestamp of the record about to be added, in PCAN ticks.
+ * @note Call it before pcan_record_buffer_request(); the record then opens a new block with its timestamp in full.
+ */
+static void pcan_record_timestamp_guard( PCAN_RECORD_BUFFER_EX *prec, uint16_t ts )
+{
+  //? The host rebuilds a 1-byte timestamp from the previous record's, which only works while records are less than 256 ticks apart and in order.
+  if( prec->ts_counter && ( (uint16_t)( ts - prec->ts_last ) > 0xFFu ) )
+    prec->pos = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // close the block
+}
+
+/**
+ * @brief Write a record's timestamp: in full for the first timestamped record of a block, as its low byte after that.
+ * @param[in,out] prec Record buffer; the next 1-byte timestamp is measured from this one.
+ * @param[out]    ptr  Where the timestamp goes.
+ * @param[in]     ts   Timestamp in PCAN ticks.
+ * @return Bytes written, 2 or 1.
+ */
+static uint8_t pcan_record_put_timestamp( PCAN_RECORD_BUFFER_EX *prec, uint8_t *ptr, uint16_t ts )
+{
+  uint8_t size = 1; // low byte after the block's first timestamp
+
+  if( prec->ts_counter == 0 )
+  {
+    pack_u16( ptr, ts ); // first timestamped record of the block
+    size = 2;
+  }
+  else
+  {
+    pack_u8( ptr, ts & 0xFF ); // the host takes the high byte from the previous record
+  }
+  ++prec->ts_counter;
+  prec->ts_last = ts; // reference for the next record's 1-byte timestamp
+  return size;
+}
+
+/**
+ * @brief Append a timestamped bus event record carrying the error code capture and the CAN error counters.
  * @param[in,out] prec  Record buffer the record is appended to.
- * @param[in]     flags PCAN_USB_ERR_CNT_INC when the bus state worsened, PCAN_USB_ERR_CNT_DEC when it recovered.
+ * @param[in]     flags PCAN_USB_ERR_CNT_INC for a bus error or a worse bus state, PCAN_USB_ERR_CNT_DEC when the state recovered.
  * @return 1 when the record is appended, 0 when @p prec has no room for it.
+ * @note The record carries pcan_device.can.ecc and the error counters in pcan_device.can.
  */
 static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
 {
   uint8_t *ptr, sl, pos = 0;
+  uint16_t ts = pcan_timestamp_ticks(); // when the event is reported
 
-  ptr = pcan_record_buffer_request( prec, 6 );
+  pcan_record_timestamp_guard( prec, ts ); // keep a 1-byte timestamp decodable
+  ptr = pcan_record_buffer_request( prec, 8 );
   if( !ptr )
     return 0; // no room for the record
 
   /* sl */
-  sl = PCAN_USB_STATUSLEN_INTERNAL | 0x03;
+  //? The Windows CAN Driver decodes a bus event record only with a timestamp; without one it shows no error frame and drops the rest of the block.
+  sl = PCAN_USB_STATUSLEN_TIMESTAMP | PCAN_USB_STATUSLEN_INTERNAL | 0x03;
   pack_u8( ptr, sl );
   ptr += 1;
   pos += 1;
@@ -307,6 +349,11 @@ static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
   pack_u8( ptr, flags );
   ptr += 1;
   pos += 1;
+
+  /* timestamp */
+  uint8_t ts_size = pcan_record_put_timestamp( prec, ptr, ts ); // 2 bytes for the block's first timestamped record, else 1
+  ptr += ts_size;
+  pos += ts_size;
 
   /* ecc */
   pack_u8( ptr, pcan_device.can.ecc );
@@ -340,11 +387,7 @@ static uint8_t pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message
 {
   uint8_t *ptr, pos = 0;
 
-  //- Keep 1-byte timestamps decodable
-  //? The host rebuilds a 1-byte timestamp from the previous record's, which only works while records are less than 256 ticks apart.
-  if( prec->ts_counter && ( (uint16_t)( msg->timestamp - prec->ts_last ) > 0xFFu ) )
-    prec->pos = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // close the block, the record opens a new one with a 2-byte timestamp
-
+  pcan_record_timestamp_guard( prec, msg->timestamp ); // keep the 1-byte timestamp decodable
   ptr = pcan_record_buffer_request( prec, BUFFER_MINIMAL_GAP_SIZE );
   /* wow ! too fast too furious !!! */
   if( !ptr )
@@ -405,22 +448,9 @@ static uint8_t pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message
   }
   
   /* timestamp to ticks, 1 tick is 42.666us */
-  uint16_t timestamp16 = msg->timestamp;
-
-  if( prec->ts_counter == 0 )
-  {
-    pack_u16( ptr, timestamp16 );
-    ptr += 2;
-    pos += 2;  
-  }
-  else
-  {
-    pack_u8( ptr, timestamp16&0xFF );
-    ptr += 1;
-    pos += 1;
-  }
-  ++prec->ts_counter;
-  prec->ts_last = timestamp16; // reference for the next record's 1-byte timestamp
+  uint8_t ts_size = pcan_record_put_timestamp( prec, ptr, msg->timestamp ); // 2 bytes for the block's first timestamped record, else 1
+  ptr += ts_size;
+  pos += ts_size;
 
   if( !( sl & PCAN_USB_STATUSLEN_RTR ) )
   {
@@ -462,13 +492,43 @@ static int pcan_rx_message( const can_message_t *msg )
 }
 
 /**
- * @brief Latch CAN controller error events for the next error record.
- * @param[in] err    CAN_ERROR_FLAG_* events from the controller.
- * @param[in] rx_err Receive error counter.
- * @param[in] tx_err Transmit error counter.
- * @note Bus-off is not latched here; pcan_bus_state_poll() reports it as a state change.
+ * @brief Build the SJA1000 error code capture byte the host drivers decode from a bus error.
+ * @param[in] bus_err CAN_LEC_* code, with CAN_BUS_ERR_RX when no TX mailbox was pending.
+ * @return Error type, direction and segment in the PCAN_USB_ECC_* layout.
+ * @note bxCAN reports no bit position: ACK and CRC errors carry the segment their type implies, the others segment 0.
  */
-static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
+static uint8_t pcan_bus_error_ecc( uint8_t bus_err )
+{
+  uint8_t dir = ( bus_err & CAN_BUS_ERR_RX ) ? PCAN_USB_ECC_RX : 0; // receiving when no mailbox was pending
+
+  switch( bus_err & ~CAN_BUS_ERR_RX )
+  {
+    case CAN_LEC_ACK:
+      return PCAN_USB_ECC_OTHER | PCAN_USB_ECC_SEG_ACK; // only a transmitter misses the acknowledge
+    case CAN_LEC_CRC:
+      return PCAN_USB_ECC_OTHER | PCAN_USB_ECC_RX | PCAN_USB_ECC_SEG_CRC; // only receivers check the CRC
+    case CAN_LEC_BIT_RECESSIVE:
+    case CAN_LEC_BIT_DOMINANT:
+      return PCAN_USB_ECC_BIT; // bit monitoring is the transmitter's
+    case CAN_LEC_STUFF:
+      return PCAN_USB_ECC_STUFF | dir; // either side
+    case CAN_LEC_FORM:
+      return PCAN_USB_ECC_FORM | dir; // either side
+    default:
+      return PCAN_USB_ECC_OTHER | dir; // unknown code
+  }
+}
+
+/**
+ * @brief Latch CAN controller error events for the next error record, and report bus errors when the host asked for them.
+ * @param[in] err     CAN_ERROR_FLAG_* events from the controller.
+ * @param[in] bus_err The last bus error, a CAN_LEC_* code with CAN_BUS_ERR_RX; read only with CAN_ERROR_FLAG_BUS_ERR.
+ * @param[in] rx_err  Receive error counter.
+ * @param[in] tx_err  Transmit error counter.
+ * @note Bus-off is not latched here; pcan_bus_state_poll() reports it as a state change.
+ * @note Bus errors since the last poll share one bus event record, carrying the last one; PCAN_USB_ERR_ECC in the host's mask enables them.
+ */
+static void pcan_can_error( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err )
 {
   pcan_device.can.rx_err = rx_err;
   pcan_device.can.tx_err = tx_err;
@@ -478,6 +538,12 @@ static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
   {
     pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR; // the controller's RX FIFO dropped frames
   }
+
+  //- Report the bus error the way a PCAN-USB reports its SJA1000 bus error interrupt
+  if( !( err & CAN_ERROR_FLAG_BUS_ERR ) || !( pcan_device.can.err_mask & PCAN_USB_ERR_ECC ) )
+    return; // no bus error, or the host did not ask for them
+  pcan_device.can.ecc = pcan_bus_error_ecc( bus_err ); // error code capture for the record
+  pcan_bus_event( &pcan_records, PCAN_USB_ERR_CNT_INC ); // a bus error raises a counter; dropped when the buffer is full
 }
 
 /**
