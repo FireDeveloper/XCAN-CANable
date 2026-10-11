@@ -5,7 +5,7 @@
 #include "pcan_timestamp.h"
 #include "pcan_varian.h"
 
-#define CAN_TX_FIFO_SIZE (100)
+#define CAN_TX_FIFO_SIZE (128) // frames the host can queue ahead of the TX mailboxes
 #define CAN_TX_MAILBOXES (3) // bxCAN transmit mailboxes
 #define CAN_RX_RING_SIZE (128) // frames and echoes the CAN interrupt can queue ahead of the main loop
 #define CAN_RX_RESERVE (64) // RX ring slots kept for frames from other nodes while echoes wait for USB

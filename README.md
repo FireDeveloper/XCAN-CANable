@@ -77,10 +77,10 @@ When the host floods the bus, the board sends back to back. Nodes whose frames h
 
 | Resource | Size |
 |---|---|
-| Flash | 16,868 bytes of 65,536 (26%) |
-| RAM, static | 10,312 bytes of 16,384 |
+| Flash | 16,888 bytes of 65,536 (26%) |
+| RAM, static | 10,872 bytes of 16,384 |
 | Stack reserve | 2,048 bytes |
-| Transmit queue | 100 frames |
+| Transmit queue | 128 frames |
 | Receive buffer | 128 frames or echoes |
 | USB record buffer | 896 bytes, 14 USB packets |
 
@@ -149,7 +149,7 @@ The serial number is the XOR of the 32-bit words of the STM32's 96-bit unique ID
 
 ### Data path
 
-- The CAN interrupt does the time-critical work: it empties the controller's 3-frame receive FIFO into a 128-entry ring and stamps each frame, retires finished transmit mailboxes in the order they were loaded, queues their echoes, and refills free mailboxes from the 100-frame transmit queue.
+- The CAN interrupt does the time-critical work: it empties the controller's 3-frame receive FIFO into a 128-entry ring and stamps each frame, retires finished transmit mailboxes in the order they were loaded, queues their echoes, and refills free mailboxes from the 128-frame transmit queue.
 - The main loop polls USB, packs received frames, echoes and status into 64-byte USB packets, and decodes the host's frames into the transmit queue.
 - The controller sends its mailboxes in load order (transmit FIFO priority), so the host's order holds with several mailboxes in flight.
 
