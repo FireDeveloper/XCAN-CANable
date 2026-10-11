@@ -458,7 +458,8 @@ int pcan_flush_data( struct t_m2h_fsm *pfsm, void *src, int size )
       assert( p_data->ep_tx_in_use[pfsm->ep_addr&0x0F] == 0 );
       if( size > pfsm->dbsize )
         break;
-      memcpy( pfsm->pdbuf, src, size );
+      if( size )
+        memcpy( pfsm->pdbuf, src, size ); // a ZLP has no source to copy
       p_data->ep_tx_in_use[pfsm->ep_addr&0x0F] = 1;
       /* prepare data transmit */
       pdev->ep_in[pfsm->ep_addr & EP_ADDR_MSK].total_length = size;

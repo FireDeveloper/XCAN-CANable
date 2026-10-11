@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
+#include "stm32f0xx_hal.h"
 #include "pcan_can.h"
 #include "pcan_usb.h"
 #include "pcan_packet.h"
@@ -18,6 +19,7 @@ static struct
 
   uint16_t last_timestamp_sync;
   uint16_t last_flush;
+  uint8_t  zlp_pending; // a data transfer went out and still needs its terminating ZLP
   struct
   {
     /* error handling related */
@@ -62,6 +64,7 @@ typedef struct
   uint8_t buffer[PCAN_MAX_RECORD_SIZE];
   /* ts counter, need to provide correct timestamp correction ( 2 or 1 byte ) */
   uint16_t ts_counter;
+  uint16_t ts_last; // timestamp of the previous timestamped record in the current block
   uint16_t pos;
 }
 PCAN_RECORD_BUFFER_EX;
@@ -251,12 +254,12 @@ uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
   if( prec->pos <= HEADER_SIZE )
   {
     /* try to send ZLP, original 800 */
-    if( pcan_device.last_flush && (((uint16_t)(ts_ticks - pcan_device.last_flush)) >= PCAN_TICKS_FROM_US( 800 )) )
+    if( pcan_device.zlp_pending && (((uint16_t)(ts_ticks - pcan_device.last_flush)) >= PCAN_TICKS_FROM_US( 800 )) ) // 800 us after the last transfer
     {
       res = pcan_flush_data( &data_fsm, 0, 0 );
       if( res )
       {
-        pcan_device.last_flush = 0;
+        pcan_device.zlp_pending = 0; // transfer terminated
       }
     }
     return 0;
@@ -268,6 +271,7 @@ uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
   {
     pcan_record_buffer_reset( prec );
     pcan_device.last_flush = ts_ticks;
+    pcan_device.zlp_pending = 1; // a whole number of 64-byte packets needs a ZLP to end the host's transfer
     return 1;
   }
 
@@ -330,10 +334,16 @@ static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
  * @param[in,out] prec Record buffer; flushed to USB first when it has no room.
  * @param[in]     msg  Frame to record; a DLC above 8 is recorded as 8.
  * @note A frame that finds no room even after a flush is dropped and latches PCAN_USB_ERROR_RXQOVR.
+ * @note A frame 256 or more ticks after the previous record starts a new block, so its timestamp goes out in full.
  */
 static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t *msg )
 {
   uint8_t *ptr, pos = 0;
+
+  //- Keep 1-byte timestamps decodable
+  //? The host rebuilds a 1-byte timestamp from the previous record's, which only works while records are less than 256 ticks apart.
+  if( prec->ts_counter && ( (uint16_t)( msg->timestamp - prec->ts_last ) > 0xFFu ) )
+    prec->pos = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // close the block, the record opens a new one with a 2-byte timestamp
 
   ptr = pcan_record_buffer_request( prec, BUFFER_MINIMAL_GAP_SIZE );
   /* wow ! too fast too furious !!! */
@@ -406,9 +416,10 @@ static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t 
   {
     pack_u8( ptr, timestamp16&0xFF );
     ptr += 1;
-    pos += 1;  
+    pos += 1;
   }
   ++prec->ts_counter;
+  prec->ts_last = timestamp16; // reference for the next record's 1-byte timestamp
 
   if( !( sl & PCAN_USB_STATUSLEN_RTR ) )
   {
@@ -772,7 +783,13 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
         break;
         /* set led mode */
         case PCAN_USB_CMD_LED:
+        {
+          int idle = pcan_device.bus_active ? LED_MODE_OFF : LED_MODE_ON; // LED state outside identify
           pcan_device.led_mode = cmd->param[0];
+          //? Linux toggles this value twice a second while other hosts may send 1 once, and a fast blink identifies the board either way.
+          pcan_led_set_mode( LED_CH0_TX, cmd->param[0] ? LED_MODE_BLINK_FAST : idle, 0 ); // blink to identify, or restore
+          pcan_led_set_mode( LED_CH0_RX, cmd->param[0] ? LED_MODE_BLINK_FAST : idle, 0 ); // blink to identify, or restore
+        }
         break;
       }
     break;
@@ -896,6 +913,7 @@ uint8_t pcan_protocol_data_ready( void )
 
 void pcan_protocol_init( void )
 {
+  pcan_device.device_serial = HAL_GetUIDw0() ^ HAL_GetUIDw1() ^ HAL_GetUIDw2(); // per-chip serial number from the 96-bit unique ID
   pcan_device.sja1000_ic_mode = SJA1000_PELICAN;
   pcan_record_buffer_reset( &pcan_records );
   pcan_can_init();

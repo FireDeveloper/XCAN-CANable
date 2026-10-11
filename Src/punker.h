@@ -6,10 +6,10 @@
                             ( ((uint8_t*)(ptr))[1] << 8 ) |\
                             ( ((uint8_t*)(ptr))[0] ) )
 #define unpack_u32( ptr ) (\
-                            ( (uint32_t)((uint8_t*)ptr)[3] << 24 ) |\
-                            ( (uint32_t)((uint8_t*)ptr)[2] << 16 ) |\
-                            ( (uint32_t)((uint8_t*)ptr)[1] << 8 ) |\
-                            ( (uint32_t)((uint8_t*)ptr)[0] ) )
+                            ( (uint32_t)((uint8_t*)(ptr))[3] << 24 ) |\
+                            ( (uint32_t)((uint8_t*)(ptr))[2] << 16 ) |\
+                            ( (uint32_t)((uint8_t*)(ptr))[1] << 8 ) |\
+                            ( (uint32_t)((uint8_t*)(ptr))[0] ) )
 
 #define unpack_float( ptr ) *(float*)(uint32_t[]){ unpack_u32( ptr ) }
 

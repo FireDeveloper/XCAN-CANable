@@ -95,7 +95,8 @@ void pcan_led_poll( void )
         led_mode_array[i].state ^= 1;
         led_mode_array[i].timestamp += led_mode_array[i].delay;
         led_mode_array[i].timestamp |= 1;
-        if( led_mode_array[i].arg && ( led_mode_array[i].arg <= ts_ms ) )
+        //? arg is a deadline on the 16-bit ms clock, so a plain <= misfires around the 65.5 s wrap and can blink for a full wrap.
+        if( led_mode_array[i].arg && ( (int16_t)( ts_ms - led_mode_array[i].arg ) >= 0 ) ) // blink deadline reached, wrap-safe
         {
           pcan_led_set_mode( i, LED_MODE_OFF, 0 );
         }

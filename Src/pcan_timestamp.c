@@ -13,6 +13,8 @@ void pcan_timestamp_init( void )
       __HAL_RCC_TIM3_CLK_ENABLE();
 
       TIM3->PSC = (2048-1); /* => tick = 42.666uS */
+      //? PSC is preloaded; without an update event TIM3 counts unscaled until its first overflow.
+      TIM3->EGR = TIM_EGR_UG; // load the prescaler now and restart the count
       /* set clock division to zero: */
       TIM3->CR1 &= (uint16_t)(~TIM_CR1_CKD);
       TIM3->CR1 |= TIM_CLOCKDIVISION_DIV1;

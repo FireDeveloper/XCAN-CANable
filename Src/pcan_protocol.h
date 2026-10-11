@@ -1,6 +1,9 @@
 #pragma once
 #include <stdint.h>
 
+/**
+ * @brief Set up the protocol state and the CAN controller; the USB serial number comes from the chip's unique ID.
+ */
 void pcan_protocol_init( void );
 void pcan_protocol_poll( void );
 void pcan_protocol_process_command( uint8_t *ptr, uint16_t size );
