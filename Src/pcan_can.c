@@ -28,9 +28,11 @@ static struct
   uint32_t rx_errs;
   uint32_t rx_ovfs;
 
+  //? The main loop fills the TX FIFO and the CAN interrupt empties it, so each index has a single writer.
+  //? pcan_can_set_bus_active() resets both with the interrupt masked.
   can_message_t tx_fifo[CAN_TX_FIFO_SIZE];
-  uint32_t tx_head;
-  uint32_t tx_tail;
+  volatile uint32_t tx_head; // next slot pcan_can_send_message() fills
+  volatile uint32_t tx_tail; // next slot pcan_can_flush_tx() loads into mailbox 0
   //? The vendored HAL_CAN_AddTxMessage() loads mailbox 0 only, so one slot covers every frame in flight.
   can_message_t tx_echo; // frame in mailbox 0, echoed to the host once it completes
   uint8_t tx_echo_valid; // the host asked for an echo of tx_echo
@@ -96,28 +98,36 @@ void pcan_can_init(void)
 
   //- Serve the controller from its interrupt
   //? The RX FIFO holds 3 frames, about 150 us at 1 Mbit/s, and a main-loop pass with USB work takes longer, so polling lost frames.
+  //? Refilling mailbox 0 from its completion interrupt also sends queued frames back to back.
   HAL_NVIC_SetPriority( CEC_CAN_IRQn, 1, 0 ); // below SysTick
-  HAL_NVIC_EnableIRQ( CEC_CAN_IRQn ); // CEC_CAN_IRQHandler() runs HAL_CAN_IRQHandler()
+  HAL_NVIC_EnableIRQ( CEC_CAN_IRQn ); // CEC_CAN_IRQHandler() serves the controller and refills mailbox 0
 }
 
 /**
  * @brief Apply g_hcan.Init to the controller and put it back on the bus when it was started.
  * @note A controller that fails to enter init mode or to resync stays off the bus until the next bus-on command.
+ * @note The CAN interrupt stays masked meanwhile; queued frames go out once the controller is back on the bus.
  */
 static void pcan_can_reinit( void )
 {
   //- Remember whether the controller was on the bus
   uint8_t was_started = ( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_LISTENING ); // HAL_CAN_Init leaves it in init mode
 
+  //- Keep the CAN interrupt out while the controller changes
+  //? The interrupt loads mailbox 0 and switches MCR.NART, so it must not run between the HAL's read-modify-writes of MCR.
+  HAL_NVIC_DisableIRQ( CEC_CAN_IRQn ); // its events wait until the controller is settled
+
   //- Reconfigure in init mode
   HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // a queued frame must not go out with the old settings
   can_dev.tx_echo_valid = 0; // the aborted frame is never echoed
-  if( HAL_CAN_Init( &g_hcan ) != HAL_OK )
-    return; // controller never entered init mode
+  uint8_t in_init = ( HAL_CAN_Init( &g_hcan ) == HAL_OK ); // controller holds the new settings in init mode
 
   //- Rejoin the bus when it was on
-  if( was_started && ( HAL_CAN_Start( &g_hcan ) != HAL_OK ) )
+  if( in_init && was_started && ( HAL_CAN_Start( &g_hcan ) != HAL_OK ) )
     HAL_CAN_Init( &g_hcan ); // leave the error state the start timeout left
+
+  //- Let the interrupt serve the controller again
+  HAL_NVIC_EnableIRQ( CEC_CAN_IRQn ); // pending events run now; pcan_can_poll() restarts queued frames
 }
 
 void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t sjw )
@@ -196,7 +206,7 @@ static int pcan_try_send_message( const can_message_t *p_msg )
  * @note Does nothing while the controller is stopped, so a closed channel never loads a mailbox.
  * @note Switches automatic retransmission to match the frame's CAN_FLAG_ONESHOT, waiting for mailbox 0 to empty first.
  * @note Keeps the loaded frame so HAL_CAN_TxMailbox0CompleteCallback() can echo it.
- * @note Runs in the main loop only, never in the CAN interrupt.
+ * @note Runs in the CAN interrupt only, after each event the HAL handled; pcan_can_poll() raises the interrupt for frames queued while mailbox 0 sat idle.
  */
 static void pcan_can_flush_tx( void )
 {
@@ -210,14 +220,15 @@ static void pcan_can_flush_tx( void )
   if( can_dev.tx_head == can_dev.tx_tail )
     return;
 
+  __DMB(); // read the slot only after seeing the head that published it
   p_msg = &can_dev.tx_fifo[can_dev.tx_tail];
 
-  //- Wait for mailbox 0 and for the interrupt to finish its previous frame
-  //? Loading mailbox 0 clears its request-completed flag, so a completion the interrupt has not handled yet would never echo.
+  //- Wait for mailbox 0 and for HAL_CAN_IRQHandler() to handle its previous frame
+  //? Loading mailbox 0 clears its request-completed flag, so a completion the HAL has not handled yet would never echo.
   //? One TSR snapshot decides both: once it shows the mailbox empty and handled, no completion can slip in before the load.
   uint32_t tsr = g_hcan.Instance->TSR; // mailbox 0 state
   if( !( tsr & CAN_TSR_TME0 ) || ( tsr & CAN_TSR_RQCP0 ) )
-    return; // previous frame still on the wire, or its completion not handled yet
+    return; // frame still on the wire, or a completion that re-enters this interrupt first
 
   //- Match automatic retransmission to the frame; mailbox 0 is empty, so no frame is pending
   FunctionalState retransmit = ( p_msg->flags & CAN_FLAG_ONESHOT ) ? DISABLE : ENABLE; // one-shot frames get a single attempt
@@ -245,7 +256,8 @@ static void pcan_can_flush_tx( void )
   uint32_t tail = can_dev.tx_tail+1;
   if( tail == CAN_TX_FIFO_SIZE )
     tail = 0;
-  can_dev.tx_tail = tail;
+  __DMB(); // finish reading the slot before the main loop may refill it
+  can_dev.tx_tail = tail; // release the slot
 }
 
 int pcan_can_send_message( const can_message_t *p_msg )
@@ -264,7 +276,8 @@ int pcan_can_send_message( const can_message_t *p_msg )
   }
 
   can_dev.tx_fifo[can_dev.tx_head] = *p_msg;
-  can_dev.tx_head = head;
+  __DMB(); // finish the copy before the interrupt can see the new head
+  can_dev.tx_head = head; // hand the slot to pcan_can_flush_tx()
 
   return 0;
 }
@@ -291,6 +304,7 @@ void pcan_can_set_loopback( uint8_t loopback )
 
 /**
  * @brief Drop every frame still queued for transmission.
+ * @note Call it with the CAN interrupt masked; it also resets the index pcan_can_flush_tx() advances.
  */
 static void pcan_can_tx_fifo_clear( void )
 {
@@ -301,6 +315,11 @@ static void pcan_can_tx_fifo_clear( void )
 
 int pcan_can_set_bus_active( uint16_t mode )
 {
+  int result = 0; // bus left, or joined
+
+  //- Keep the CAN interrupt out while the controller changes
+  HAL_NVIC_DisableIRQ( CEC_CAN_IRQn ); // as in pcan_can_reinit(), the HAL's MCR writes must not interleave with it
+
   //- Leave the bus and drop pending frames, also before a restart
   HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // cancel pending mailbox requests
   if( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_LISTENING )
@@ -308,16 +327,17 @@ int pcan_can_set_bus_active( uint16_t mode )
   if( HAL_CAN_GetState( &g_hcan ) != HAL_CAN_STATE_READY )
     HAL_CAN_Init( &g_hcan ); // leave the error state a failed start or stop left behind
   pcan_can_tx_fifo_clear(); // nothing queued outlives the session
-  if( !mode )
-    return 0; // bus off requested
 
-  //- Join the bus; leaving init mode also starts the bus-off recovery sequence
-  if( HAL_CAN_Start( &g_hcan ) != HAL_OK )
+  //- Join the bus when asked; leaving init mode also starts the bus-off recovery sequence
+  if( mode && ( HAL_CAN_Start( &g_hcan ) != HAL_OK ) )
   {
     HAL_CAN_Init( &g_hcan ); // leave the error state the start timeout left
-    return -1; // controller never saw an idle bus
+    result = -1; // controller never saw an idle bus
   }
-  return 0; // on the bus
+
+  //- Let the interrupt serve the controller again
+  HAL_NVIC_EnableIRQ( CEC_CAN_IRQn ); // pending events, such as the abort completion, run now
+  return result;
 }
 
 void pcan_can_get_bus_status( can_bus_status_t *p_status )
@@ -448,8 +468,11 @@ void pcan_can_poll(void)
     can_dev.can_err_cb( errs, status.rx_err, status.tx_err ); // report the events with the hardware counters
   }
 
-  //- Move the next queued frame into mailbox 0
-  pcan_can_flush_tx();
+  //- Start mailbox 0 for frames queued while it sat idle
+  //? Only the CAN interrupt loads mailbox 0, and an idle mailbox raises no interrupt of its own.
+  uint8_t idle = ( g_hcan.Instance->TSR & CAN_TSR_TME0 ) && ( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_LISTENING ); // empty mailbox, bus on
+  if( idle && ( can_dev.tx_head != can_dev.tx_tail ) )
+    HAL_NVIC_SetPendingIRQ( CEC_CAN_IRQn ); // CEC_CAN_IRQHandler() loads the next frame
 }
 
 void HAL_CAN_RxFifo0MsgPendingCallback( CAN_HandleTypeDef *hcan )
@@ -539,4 +562,5 @@ void HAL_CAN_ErrorCallback( CAN_HandleTypeDef *hcan )
 void CEC_CAN_IRQHandler( void )
 {
   HAL_CAN_IRQHandler( &g_hcan ); // RX into the ring, TX completions and errors, all in interrupt context
+  pcan_can_flush_tx(); // refill mailbox 0 as soon as its completion is handled
 }
