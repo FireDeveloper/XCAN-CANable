@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 
+#define CAN_FLAG_ONESHOT (0x10) // transmit once, no automatic retransmission
 #define CAN_FLAG_ECHO  (0x20)
 #define CAN_FLAG_RTR   (0x40)
 #define CAN_FLAG_EXTID (0x80)

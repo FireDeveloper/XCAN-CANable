@@ -30,6 +30,9 @@ static struct
   can_message_t tx_fifo[CAN_TX_FIFO_SIZE];
   uint32_t tx_head;
   uint32_t tx_tail;
+  //? The vendored HAL_CAN_AddTxMessage() loads mailbox 0 only, so one slot covers every frame in flight.
+  can_message_t tx_echo; // frame in mailbox 0, echoed to the host once it completes
+  uint8_t tx_echo_valid; // the host asked for an echo of tx_echo
   void (*rx_cb)(can_message_t *);
   void (*can_err_cb)( uint8_t err, uint8_t rx_err, uint8_t tx_err );
 }
@@ -97,6 +100,7 @@ static void pcan_can_reinit( void )
 
   //- Reconfigure in init mode
   HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // a queued frame must not go out with the old settings
+  can_dev.tx_echo_valid = 0; // the aborted frame is never echoed
   if( HAL_CAN_Init( &g_hcan ) != HAL_OK )
     return; // controller never entered init mode
 
@@ -179,6 +183,8 @@ static int pcan_try_send_message( const can_message_t *p_msg )
 /**
  * @brief Move the oldest queued frame into a free TX mailbox.
  * @note Does nothing while the controller is stopped, so a closed channel never loads a mailbox.
+ * @note Switches automatic retransmission to match the frame's CAN_FLAG_ONESHOT, waiting for mailbox 0 to empty first.
+ * @note Keeps the loaded frame so HAL_CAN_TxMailbox0CompleteCallback() can echo it.
  */
 static void pcan_can_flush_tx( void )
 {
@@ -191,10 +197,29 @@ static void pcan_can_flush_tx( void )
   /* empty fifo */
   if( can_dev.tx_head == can_dev.tx_tail )
     return;
-  
+
   p_msg = &can_dev.tx_fifo[can_dev.tx_tail];
+
+  //- Match automatic retransmission to the frame, switched only while no frame is pending
+  FunctionalState retransmit = ( p_msg->flags & CAN_FLAG_ONESHOT ) ? DISABLE : ENABLE; // one-shot frames get a single attempt
+  if( retransmit != g_hcan.Init.AutoRetransmission )
+  {
+    if( !( g_hcan.Instance->TSR & CAN_TSR_TME0 ) )
+      return; // mailbox 0 still holds the previous frame
+    g_hcan.Init.AutoRetransmission = retransmit; // HAL_CAN_Init() re-applies it after a re-init
+    if( retransmit == ENABLE )
+      CLEAR_BIT( g_hcan.Instance->MCR, CAN_MCR_NART ); // retransmit until acknowledged
+    else
+      SET_BIT( g_hcan.Instance->MCR, CAN_MCR_NART ); // one attempt only
+  }
+
   if( pcan_try_send_message( p_msg ) < 0 )
     return;
+
+  //- Keep the frame for its echo
+  can_dev.tx_echo = *p_msg; // mailbox 0 holds this frame until it completes
+  can_dev.tx_echo_valid = ( p_msg->flags & CAN_FLAG_ECHO ) != 0; // echo only what the host asked for
+
   /* update fifo index */
   uint32_t tail = can_dev.tx_tail+1;
   if( tail == CAN_TX_FIFO_SIZE )
@@ -250,6 +275,7 @@ static void pcan_can_tx_fifo_clear( void )
 {
   can_dev.tx_head = 0; // empty the software TX FIFO
   can_dev.tx_tail = 0; // read index follows the write index
+  can_dev.tx_echo_valid = 0; // an aborted frame is never echoed
 }
 
 int pcan_can_set_bus_active( uint16_t mode )
@@ -363,6 +389,20 @@ void HAL_CAN_TxMailbox0CompleteCallback( CAN_HandleTypeDef *hcan )
 {
   UNUSED( hcan );
   ++can_dev.tx_msgs;
+
+  //- Echo the frame now that it is on the bus
+  if( can_dev.tx_echo_valid && can_dev.rx_cb )
+  {
+    can_dev.tx_echo_valid = 0; // one echo per frame
+    can_dev.tx_echo.timestamp = pcan_timestamp_ticks(); // completion time, not queue time
+    can_dev.rx_cb( &can_dev.tx_echo ); // the protocol records it like a received frame with the echo flag
+  }
+}
+
+void HAL_CAN_TxMailbox0AbortCallback( CAN_HandleTypeDef *hcan )
+{
+  UNUSED( hcan );
+  can_dev.tx_echo_valid = 0; // an aborted frame is never echoed
 }
 
 void HAL_CAN_TxMailbox1CompleteCallback( CAN_HandleTypeDef *hcan )

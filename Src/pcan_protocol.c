@@ -26,6 +26,7 @@ static struct
     uint8_t   rx_err;
     uint8_t   tx_err;
     uint8_t   bus_state; // CAN_BUS_STATE_* last reported to the host
+    uint8_t   err_state_sent; // bus_state carried by the last error record; 0xFF forces the next one
     /* config */
     uint8_t   btr0;
     uint8_t   btr1;
@@ -470,6 +471,7 @@ static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
  * @param[in] flags The record's status/length byte.
  * @return Bytes left in the packet after this record; 0 when the bus is off or the record is truncated.
  * @note A frame that finds the TX FIFO full is dropped and latches PCAN_USB_ERROR_TXFULL; see pcan_protocol_data_ready().
+ * @note A requested echo is sent only once the frame completed on the bus; a single-shot frame that fails is never echoed.
  */
 static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flags  )
 {
@@ -477,6 +479,7 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
   uint8_t rec_len = flags & PCAN_USB_STATUSLEN_DLC;
   /* return back frame to PC */
   uint8_t srr_flag = 0;
+  uint8_t at_flag = 0; // host asked for a single-shot transmission
 
   if( !pcan_device.bus_active )
     return 0;
@@ -487,7 +490,8 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
     if( size < sizeof( uint32_t ) )
       return 0;
     id = unpack_u32( ptr );
-    srr_flag = id & 0x01;
+    srr_flag = id & PCAN_USB_TX_SRR; // echo requested
+    at_flag = id & PCAN_USB_TX_AT; // single shot requested
     id >>= 3;
 
     msg.flags = CAN_FLAG_EXTID;
@@ -502,7 +506,8 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
     if( size < sizeof( uint16_t ) )
       return 0;
     id = unpack_u16( ptr );
-    srr_flag = id & 0x01;
+    srr_flag = id & PCAN_USB_TX_SRR; // echo requested
+    at_flag = id & PCAN_USB_TX_AT; // single shot requested
     id >>= 5;
 
     msg.id = id;
@@ -542,6 +547,12 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
     size -= sizeof( uint8_t );
   }
 
+  //- Carry the host's echo and single-shot requests with the queued frame
+  if( srr_flag )
+    msg.flags |= CAN_FLAG_ECHO; // echoed from HAL_CAN_TxMailbox0CompleteCallback() once the frame is on the bus
+  if( at_flag )
+    msg.flags |= CAN_FLAG_ONESHOT; // one attempt, no automatic retransmission
+
   msg.timestamp = pcan_timestamp_ticks();
 
   pcan_led_set_mode( LED_CH0_TX, LED_MODE_BLINK_FAST, 237 );
@@ -552,12 +563,6 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
     /* tx buffer overflow, drop all data */
     pcan_device.can.err |= PCAN_USB_ERROR_TXFULL;
     return size;
-  }
-  /* return back to PC */
-  if( srr_flag )
-  {
-    msg.flags |= CAN_FLAG_ECHO;
-    pcan_rx_message( &msg );
   }
   return size;
 }
@@ -582,7 +587,7 @@ static void pcan_set_bitrate( uint8_t *ptr )
  * @brief Append an error record: the latched error events plus the bus state last reported to the host.
  * @param[in,out] prec Record buffer the record is appended to.
  * @return 1 when the record is appended, 0 when @p prec has no room for it.
- * @note The latched events in pcan_device.can.err are cleared only once the record is appended.
+ * @note Only once the record is appended are the latched events in pcan_device.can.err cleared and the reported state saved in err_state_sent.
  */
 static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
 {
@@ -612,11 +617,16 @@ static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
   pack_u8( &ptr[2], n ); // number: PCAN_USB_ERROR_* bits
   pcan_record_buffer_commit( prec, 3 ); // publish the record
   pcan_device.can.err = 0x00; // latched events are reported
+  pcan_device.can.err_state_sent = pcan_device.can.bus_state; // the host now knows this state
   return 1; // record appended
 }
 
-/* create */
-void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
+/**
+ * @brief Append a timesync record, followed by an error record when there is something to report.
+ * @param[in,out] prec Record buffer the records are appended to.
+ * @note The error record goes out only with latched events or a bus state the host has not been told yet.
+ */
+static void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
 {
   uint8_t sl = PCAN_USB_STATUSLEN_INTERNAL | 2 /* record data size */;
   uint8_t *ptr, pos = 0;
@@ -649,7 +659,9 @@ void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
   /* add new record */
   pcan_record_buffer_commit( prec, pos );
 
-  pcan_error_event( prec ); // repeat the error status with every timesync
+  //? The Linux CAN Driver posts an error frame for every error record, so a record with nothing new would show up as noise once a second.
+  if( pcan_device.can.err || ( pcan_device.can.bus_state != pcan_device.can.err_state_sent ) )
+    pcan_error_event( prec ); // latched events, or a state change a full buffer kept from the host
 }
 
 /**
@@ -729,6 +741,7 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
           if( pcan_device.bus_active )
           {
             pcan_device.can.bus_state = CAN_BUS_STATE_ACTIVE; // host starts the channel error active
+            pcan_device.can.err_state_sent = 0xFF; // the first timesync carries an error record
             /* provide first timesync event */
             pcan_device.last_timestamp_sync = pcan_timestamp_ticks();
             pcan_timesync_event( &pcan_records );
