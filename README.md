@@ -173,10 +173,10 @@ The firmware lands in `build/pcan_canable.elf`, `.hex` and `.bin`. `make OPT=-Og
 
 Every push and pull request to `master` and `develop` is built by GitHub Actions. The run checks that the USB device descriptor sits at its fixed address, then attaches the `.elf`, `.hex`, `.bin` and `utilities/usb_id.py` as the `pcan_canable` artifact.
 
-Pushing a version tag also publishes a GitHub Release, with the firmware as `xcan-canable-<tag>.bin`, `.hex` and `.elf` plus `usb_id.py`:
+Pushing a version tag on a `master` commit also publishes a GitHub Release, with the firmware as `xcan-canable-<tag>.bin`, `.hex` and `.elf` plus `usb_id.py`. A version tag on any other commit fails the release job instead of publishing.
 
 ```
-git tag v1.0.0
+git tag v1.0.0 master
 git push origin v1.0.0
 ```
 
