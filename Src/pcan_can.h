@@ -40,6 +40,13 @@ void pcan_can_init( void );
 void pcan_can_poll( void );
 void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t sjw );
 int pcan_can_send_message( const can_message_t *msg );
+
+/**
+ * @brief Count the free slots in the software TX FIFO.
+ * @return Frames pcan_can_send_message() can still queue.
+ */
+uint32_t pcan_can_tx_free( void );
+
 void pcan_can_install_rx_callback( void (*cb)( can_message_t * ) );
 void pcan_can_install_error_callback( void (*cb)( uint8_t, uint8_t, uint8_t ) );
 

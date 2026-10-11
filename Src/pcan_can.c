@@ -205,6 +205,14 @@ int pcan_can_send_message( const can_message_t *p_msg )
   return 0;
 }
 
+uint32_t pcan_can_tx_free( void )
+{
+  uint32_t used = ( can_dev.tx_head + CAN_TX_FIFO_SIZE - can_dev.tx_tail ) % CAN_TX_FIFO_SIZE; // frames waiting for a mailbox
+
+  //? pcan_can_send_message() keeps one slot empty so a full FIFO differs from an empty one.
+  return ( CAN_TX_FIFO_SIZE - 1u ) - used; // slots pcan_can_send_message() can still fill
+}
+
 void pcan_can_set_silent( uint8_t silent_mode )
 {
   g_hcan.Init.Mode = silent_mode ? CAN_MODE_SILENT: CAN_MODE_NORMAL;

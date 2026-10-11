@@ -30,5 +30,10 @@ int pcan_flush_data( struct t_m2h_fsm *pfsm, void *src, int size );
 uint16_t pcan_usb_send_command_buffer( const void *p, uint16_t size );
 uint16_t pcan_usb_send_data_buffer( const void *p, uint16_t size );
 void pcan_usb_init( void );
+
+/**
+ * @brief Service the USB peripheral and resume the data endpoint once the TX FIFO has room.
+ * @note Call it from the main loop; the USB interrupt is not used.
+ */
 void pcan_usb_poll( void );
 

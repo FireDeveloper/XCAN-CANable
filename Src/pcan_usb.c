@@ -11,6 +11,7 @@
 USBD_HandleTypeDef hUsbDeviceFS;
 extern USBD_DescriptorsTypeDef FS_Desc;
 static struct t_class_data pcan_data = { 0 };
+static uint8_t msgout_paused = 0; // MSGOUT left un-armed until the TX FIFO can take a full packet
 
 struct t_pcan_description
 {
@@ -99,6 +100,30 @@ __ALIGN_BEGIN static struct t_pcan_description pcan_usb_dev __ALIGN_END =
 };
 
 
+/**
+ * @brief Re-arm the MSGOUT endpoint, or leave it NAKing until the TX FIFO can take a full packet.
+ * @param[in,out] pdev USB device handle.
+ */
+static void pcan_usb_msgout_arm( USBD_HandleTypeDef *pdev )
+{
+  PCD_EPTypeDef *p_ep = &hpcd_USB_FS.OUT_ep[PCAN_USB_EP_MSGOUT & EP_ADDR_MSK]; // HAL state of the data OUT endpoint
+
+  //- Pause while the TX FIFO cannot take a full packet
+  if( !pcan_protocol_data_ready() )
+  {
+    //? A host Clear Feature (endpoint halt) request re-validates a paused endpoint, so its transfer must restart at the buffer start, not past the end.
+    p_ep->xfer_buff = pcan_data.buffer_data; // a stray packet lands inside the buffer
+    p_ep->xfer_len = sizeof( pcan_data.buffer_data ); // room for one packet
+    p_ep->xfer_count = 0; // nothing received yet
+    msgout_paused = 1; // endpoint keeps NAKing
+    return; // pcan_usb_poll() resumes it
+  }
+
+  //- Accept the next packet
+  msgout_paused = 0; // endpoint armed
+  USBD_LL_PrepareReceive( pdev, PCAN_USB_EP_MSGOUT, pcan_data.buffer_data, sizeof( pcan_data.buffer_data ) ); // receive into the data buffer
+}
+
 static uint8_t device_init( USBD_HandleTypeDef *pdev, uint8_t cfgidx )
 {
   USB_ENDPOINT_DESCRIPTOR *p_ep = &pcan_usb_dev.ep1;
@@ -134,7 +159,8 @@ static uint8_t device_init( USBD_HandleTypeDef *pdev, uint8_t cfgidx )
 
   USBD_LL_PrepareReceive( pdev, PCAN_USB_EP_CMDOUT, pcan_data.buffer_cmd, sizeof( pcan_data.buffer_cmd ) );
   USBD_LL_PrepareReceive( pdev, PCAN_USB_EP_MSGOUT, pcan_data.buffer_data, sizeof( pcan_data.buffer_data ) );
-  
+  msgout_paused = 0; // a fresh configuration starts with MSGOUT armed
+
   return USBD_OK;
 }
 
@@ -153,7 +179,8 @@ static uint8_t device_deinit( USBD_HandleTypeDef *pdev, uint8_t cfgidx )
     else
       pdev->ep_out[ep_addr & EP_ADDR_MSK].is_used = 0;
   }
-  
+
+  msgout_paused = 0; // a closed endpoint has nothing to resume
   pdev->pClassData = (void*)0;
   return USBD_OK;
 }
@@ -188,7 +215,12 @@ uint16_t pcan_usb_send_data_buffer( const void *p, uint16_t size )
 
 void pcan_usb_poll( void )
 {
-  HAL_PCD_IRQHandler( &hpcd_USB_FS );
+  //- Service the USB peripheral
+  HAL_PCD_IRQHandler( &hpcd_USB_FS ); // run the USB events polled instead of interrupt-driven
+
+  //- Resume a paused data endpoint once the TX FIFO has room again
+  if( msgout_paused && ( hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED ) && hUsbDeviceFS.pClassData )
+    pcan_usb_msgout_arm( &hUsbDeviceFS ); // re-arms, or stays paused
 }
 
 static uint8_t  device_setup( USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req )
@@ -285,7 +317,7 @@ static uint8_t device_data_out( USBD_HandleTypeDef *pdev, uint8_t epnum )
   else if( epnum == PCAN_USB_EP_MSGOUT )
   {
     pcan_protocol_process_data( pcan_data.buffer_data, size );
-    USBD_LL_PrepareReceive( pdev, PCAN_USB_EP_MSGOUT, pcan_data.buffer_data, sizeof( pcan_data.buffer_data ) );
+    pcan_usb_msgout_arm( pdev ); // re-arm, or pause until the TX FIFO has room
   }
   else
   {

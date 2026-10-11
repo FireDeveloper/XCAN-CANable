@@ -452,14 +452,13 @@ static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
   }
 }
 
-#define WAIT_FOR_TXSLOTS 1
 /**
  * @brief Decode one CAN frame record from the host and queue it for transmission.
  * @param[in] ptr   Record bytes after its status/length byte.
  * @param[in] size  Bytes left in the USB packet from @p ptr on.
  * @param[in] flags The record's status/length byte.
  * @return Bytes left in the packet after this record; 0 when the bus is off or the record is truncated.
- * @note While the TX FIFO is full this waits up to 1 s for room, then drops the frame and latches PCAN_USB_ERROR_TXFULL.
+ * @note A frame that finds the TX FIFO full is dropped and latches PCAN_USB_ERROR_TXFULL; see pcan_protocol_data_ready().
  */
 static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flags  )
 {
@@ -536,31 +535,13 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
 
   pcan_led_set_mode( LED_CH0_TX, LED_MODE_BLINK_FAST, 237 );
 
-#if WAIT_FOR_TXSLOTS
-  const uint16_t ts_poll = pcan_timestamp_ticks();
-  /* need more time to send data... ? */
-  while( pcan_can_send_message( &msg ) < 0 )
-  {
-    /* USB will get NACK and we will not miss other data */
-    pcan_can_poll();
-    uint16_t ts_diff = pcan_timestamp_ticks() - ts_poll;
-    /* we can't tramsit couse bus off or timeout ? */
-    if( ( pcan_device.can.err & PCAN_USB_ERROR_BUS_OFF ) ||
-        ( ts_diff >= PCAN_TICKS_FROM_US( 1000000u ) ) )
-    {
-      /* tx buffer overflow, drop all data */
-      pcan_device.can.err |= PCAN_USB_ERROR_TXFULL;
-      return size;
-    }
-  }
-#else
+  //? pcan_protocol_data_ready() pauses the data endpoint before the FIFO can fill, so a full FIFO here means a packet slipped past that pause.
   if( pcan_can_send_message( &msg ) < 0 )
   {
     /* tx buffer overflow, drop all data */
     pcan_device.can.err |= PCAN_USB_ERROR_TXFULL;
     return size;
   }
-#endif
   /* return back to PC */
   if( srr_flag )
   {
@@ -873,6 +854,19 @@ void pcan_protocol_process_data( uint8_t *ptr, uint16_t size )
     ptr += eated;
     size -= eated;
   }
+}
+
+//? The smallest record is a status byte plus an 11-bit ID with no data, so a data packet holds at most this many records.
+#define DATA_PACKET_RECORDS_MAX ( ( PCAN_USB_TX_BUFFER_SIZE - PCAN_USB_MSG_HEADER_LEN ) / 3u ) // 20 records in a 64-byte packet
+
+uint8_t pcan_protocol_data_ready( void )
+{
+  //- Packets are dropped while the bus is off, so they never wait
+  if( !pcan_device.bus_active )
+    return 1; // accept and drop
+
+  //- Room for every record the next packet can hold
+  return pcan_can_tx_free() >= DATA_PACKET_RECORDS_MAX; // a full packet fits the TX FIFO
 }
 
 void pcan_protocol_init( void )
