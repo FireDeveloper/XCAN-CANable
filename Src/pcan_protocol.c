@@ -27,8 +27,8 @@ static struct
     uint8_t   ecc;
     uint8_t   rx_err;
     uint8_t   tx_err;
-    uint8_t   bus_state; // CAN_BUS_STATE_* last reported to the host
-    uint8_t   err_state_sent; // bus_state carried by the last error record; 0xFF forces the next one
+    uint8_t   bus_state; // CAN_BUS_STATE_* of the controller at the last poll
+    uint8_t   err_pending; // a state change has not reached the host in an error record yet
     /* config */
     uint8_t   btr0;
     uint8_t   btr1;
@@ -458,17 +458,14 @@ static void pcan_rx_message( can_message_t *msg )
  * @param[in] err    CAN_ERROR_FLAG_* events from the controller.
  * @param[in] rx_err Receive error counter.
  * @param[in] tx_err Transmit error counter.
+ * @note Bus-off is not latched here; pcan_bus_state_poll() reports it as a state change.
  */
 static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
 {
   pcan_device.can.rx_err = rx_err;
   pcan_device.can.tx_err = tx_err;
 
-  if( err & CAN_ERROR_FLAG_BUSOFF )
-  {
-    pcan_device.can.err |= PCAN_USB_ERROR_BUS_OFF;
-  }
-
+  //? The controller shows bus-off until its recovery after a restart ends, so a latch here would mark the "active again" record as bus-off.
   if( err & CAN_ERROR_FLAG_RX_OVF )
   {
     pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR; // the controller's RX FIFO dropped frames
@@ -595,10 +592,10 @@ static void pcan_set_bitrate( uint8_t *ptr )
 }
 
 /**
- * @brief Append an error record: the latched error events plus the bus state last reported to the host.
+ * @brief Append an error record: the latched error events plus the controller's bus state.
  * @param[in,out] prec Record buffer the record is appended to.
  * @return 1 when the record is appended, 0 when @p prec has no room for it.
- * @note Only once the record is appended are the latched events in pcan_device.can.err cleared and the reported state saved in err_state_sent.
+ * @note Only once the record is appended are the latched events in pcan_device.can.err and the pending state change cleared.
  */
 static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
 {
@@ -628,14 +625,14 @@ static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
   pack_u8( &ptr[2], n ); // number: PCAN_USB_ERROR_* bits
   pcan_record_buffer_commit( prec, 3 ); // publish the record
   pcan_device.can.err = 0x00; // latched events are reported
-  pcan_device.can.err_state_sent = pcan_device.can.bus_state; // the host now knows this state
+  pcan_device.can.err_pending = 0; // the host now knows the controller's state
   return 1; // record appended
 }
 
 /**
  * @brief Append a timesync record, followed by an error record when there is something to report.
  * @param[in,out] prec Record buffer the records are appended to.
- * @note The error record goes out only with latched events or a bus state the host has not been told yet.
+ * @note The error record goes out only with latched events or a state change the host has not been told yet.
  */
 static void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
 {
@@ -671,12 +668,12 @@ static void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
   pcan_record_buffer_commit( prec, pos );
 
   //? The Linux CAN Driver posts an error frame for every error record, so a record with nothing new would show up as noise once a second.
-  if( pcan_device.can.err || ( pcan_device.can.bus_state != pcan_device.can.err_state_sent ) )
+  if( pcan_device.can.err || pcan_device.can.err_pending )
     pcan_error_event( prec ); // latched events, or a state change a full buffer kept from the host
 }
 
 /**
- * @brief Report a change of the CAN bus state to the host.
+ * @brief Report a change of the controller's bus state to the host, as a PCAN-USB reports its SJA1000 status interrupts.
  * @param[in,out] prec Record buffer the records are appended to.
  * @note A bus event record that finds @p prec full is retried on the next call; a lost error record is repeated by the next pcan_timesync_event().
  */
@@ -690,7 +687,7 @@ static void pcan_bus_state_poll( PCAN_RECORD_BUFFER_EX *prec )
   pcan_device.can.rx_err = status.rx_err; // receive error counter for pcan_bus_event()
   pcan_device.can.tx_err = status.tx_err; // transmit error counter for pcan_bus_event()
   if( status.state == pcan_device.can.bus_state )
-    return; // state unchanged, nothing to report
+    return; // the controller's state did not change, nothing to report
 
   //- Send the error counters when the host asked for them
   //? The host reads the counters while it decodes the error record, so the bus event record has to come first.
@@ -702,7 +699,8 @@ static void pcan_bus_state_poll( PCAN_RECORD_BUFFER_EX *prec )
   }
 
   //- Report the new state now instead of at the next timesync
-  pcan_device.can.bus_state = status.state; // state the host is told about
+  pcan_device.can.bus_state = status.state; // the controller's new state
+  pcan_device.can.err_pending = 1; // owed to the host until an error record carries it
   pcan_error_event( prec ); // send the new state
 }
 
@@ -751,8 +749,12 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
 
           if( pcan_device.bus_active )
           {
-            pcan_device.can.bus_state = CAN_BUS_STATE_ACTIVE; // host starts the channel error active
-            pcan_device.can.err_state_sent = 0xFF; // the first timesync carries an error record
+            //? A PCAN-USB reports only changes of its controller's state, so a state left from before the bus-on is not announced, only its end.
+            //? That covers a bus-off still recovering after a restart and error counters carried over from the last session.
+            can_bus_status_t status;
+            pcan_can_get_bus_status( &status ); // controller state as the bus comes on
+            pcan_device.can.bus_state = status.state; // later changes are measured from here
+            pcan_device.can.err_pending = 0; // nothing owed to the host yet
             /* provide first timesync event */
             pcan_device.last_timestamp_sync = pcan_timestamp_ticks();
             pcan_timesync_event( &pcan_records );
