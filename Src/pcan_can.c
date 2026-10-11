@@ -172,12 +172,17 @@ void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t s
   if( tseg2 > 8 )
     tseg2 = 8;
 
-  /* CAN bus freq is 48 */
-  g_hcan.Init.Prescaler = brp * 6;
+  //- Split each host time quantum in two when segment 1 is a single quantum
+  //? With a 1-quantum segment 1 (BTR1 10h at 1 Mbit/s) bxCAN went bus-off on this board, while the same timing in half-length quanta works.
+  uint32_t split = ( ( tseg1 == 1 ) && ( tseg2 <= 4 ) ) ? 2u : 1u; // bxCAN quanta per host quantum
+  uint32_t sjw_split = ( sjw * split > 4u ) ? 4u : sjw * split; // jump width in bxCAN quanta, at most 4
 
-  g_hcan.Init.SyncJumpWidth = sjw_table[sjw - 1];
-  g_hcan.Init.TimeSeg1 = tseg1_table[tseg1 - 1];
-  g_hcan.Init.TimeSeg2 = tseg2_table[tseg2 - 1];
+  /* CAN bus freq is 48 */
+  g_hcan.Init.Prescaler = brp * 6 / split; // 48 MHz clocks per bxCAN quantum
+
+  g_hcan.Init.SyncJumpWidth = sjw_table[sjw_split - 1];
+  g_hcan.Init.TimeSeg1 = tseg1_table[( tseg1 + 1 ) * split - 2]; // sync and segment 1 keep their length, so the sample point stays
+  g_hcan.Init.TimeSeg2 = tseg2_table[tseg2 * split - 1];
 
   pcan_can_reinit(); // apply the timing, back on the bus when it was on
 }

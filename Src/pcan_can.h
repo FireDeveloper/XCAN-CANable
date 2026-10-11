@@ -58,12 +58,13 @@ void pcan_can_init( void );
 void pcan_can_poll( void );
 
 /**
- * @brief Set the CAN bit timing from SJA1000-style values on the 8 MHz PCAN-USB time base.
+ * @brief Set the CAN bit timing from SJA1000-style values on the host's 8 MHz time base.
  * @param[in] brp   Baud rate prescaler, 1-64.
  * @param[in] tseg1 Time segment 1 in time quanta, 1-16 (larger values clamp to 16).
  * @param[in] tseg2 Time segment 2 in time quanta, 1-8 (larger values clamp to 8).
  * @param[in] sjw   Resynchronisation jump width in time quanta, 1-4 (larger values clamp to 4).
  * @note A started controller rejoins the bus with the new timing; one that cannot resync stays off the bus until the next bus-on command.
+ * @note A 1-quantum segment 1 runs with half-length quanta; the bitrate and sample point stay as given, the jump width too unless it would pass 4 quanta.
  */
 void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t sjw );
 int pcan_can_send_message( const can_message_t *msg );
