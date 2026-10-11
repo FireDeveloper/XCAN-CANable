@@ -38,6 +38,11 @@ typedef struct
 can_message_t;
 
 void pcan_can_init( void );
+
+/**
+ * @brief Pass the frames and echoes the CAN interrupt queued to the protocol, report latched errors, and load the next TX frame.
+ * @note Call it from the main loop; the CAN interrupt itself only queues work, so the protocol callbacks never run in interrupt context.
+ */
 void pcan_can_poll( void );
 
 /**

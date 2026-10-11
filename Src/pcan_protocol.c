@@ -632,12 +632,19 @@ static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
 /**
  * @brief Append a timesync record, followed by an error record when there is something to report.
  * @param[in,out] prec Record buffer the records are appended to.
+ * @note The timesync record opens a new block, and the first frame after it carries a 2-byte timestamp.
  * @note The error record goes out only with latched events or a state change the host has not been told yet.
  */
 static void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
 {
   uint8_t sl = PCAN_USB_STATUSLEN_INTERNAL | 2 /* record data size */;
   uint8_t *ptr, pos = 0;
+
+  //- Start a new block with the timesync record
+  //? The Linux CAN Driver takes its clock reference only from a timesync record that opens a block.
+  //? A 1-byte timestamp behind a timesync takes its high byte from the timesync and its wrap check from the frame before, so it can decode 256 ticks off.
+  if( ( prec->pos & (BLOCK_SIZE-1) ) != HEADER_SIZE )
+    prec->pos = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // close the block holding earlier records
 
   ptr = pcan_record_buffer_request( prec, 5 );
   if( !ptr )
