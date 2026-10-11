@@ -15,37 +15,6 @@ void HAL_MspInit( void )
   __HAL_RCC_GPIOB_CLK_ENABLE();
 }
 
-#if ( HSE_VALUE != 0 )
-void SystemClock_Config(void)
-{
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
-
-  /* enable HSE */
-   __HAL_RCC_HSE_CONFIG(RCC_HSE_ON);
-  while( __HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY) == RESET );
-
-  /* enable PLL */
-  __HAL_RCC_PLL_DISABLE();
-  while( __HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY)  != RESET );
-#if ( HSE_VALUE == 16000000 )
-  __HAL_RCC_PLL_CONFIG( RCC_PLLSOURCE_HSE, RCC_PREDIV_DIV1, RCC_PLL_MUL3 );
-#elif ( HSE_VALUE == 8000000 )
-  __HAL_RCC_PLL_CONFIG( RCC_PLLSOURCE_HSE, RCC_PREDIV_DIV1, RCC_PLL_MUL6 );
-#endif
-  __HAL_RCC_PLL_ENABLE();
-  while( __HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY)  == RESET );
-
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-
-  HAL_RCC_ClockConfig( &RCC_ClkInitStruct, FLASH_LATENCY_1 );
-
-  __HAL_RCC_USB_CONFIG( RCC_USBCLKSOURCE_PLL );
-}
-#else
 void SystemClock_Config(void)
 {
   RCC_ClkInitTypeDef RCC_ClkInitStruct;
@@ -75,7 +44,6 @@ void SystemClock_Config(void)
 
   HAL_RCCEx_CRSConfig( &RCC_CRSInitStruct );
 }
-#endif
 
 void SysTick_Handler( void )
 {

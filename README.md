@@ -1,21 +1,39 @@
-# !ACHTUNG! READ FIRST [COPYRIGHT ISSUE](https://github.com/moonglow/pcan_cantact/issues/18)
+## XCAN firmware for the DykbRadio CANable V1.0
 
-## XCAN firmware for STM32F042 based boards
+![build workflow](https://github.com/FireDeveloper/pcan_cantact/actions/workflows/firmware_build.yml/badge.svg)
 
-![build workflow](https://github.com/moonglow/pcan_cantact/actions/workflows/firmware_build.yml/badge.svg)
+PCAN-USB protocol firmware, forked from [moonglow/pcan_cantact](https://github.com/moonglow/pcan_cantact) and trimmed to the DykbRadio "CANable V1.0".
 
 ## Target Hardware
 
-* [CANtact](https://github.com/linklayer/cantact-hw) - opensource USB-CAN adapter project `make cantact_16`
-* [CANable](https://canable.io/) - opensource USB-CAN adapter based on CANtact project `make canable`
-* [Entreé](https://github.com/tuna-f1sh/entree) - opensource USB-C CAN adapter based on CANable project `make entree`
-* [Ollie](https://github.com/slimelec/ollie-hw) - opensource USB-CAN adapter with isolated USB `make ollie`
-* Any other STM32F042 based boards with external or internal OSC.
+DykbRadio "CANable V1.0" with an STM32F072C8T6 (64 KB flash, 16 KB RAM, no crystal).
 
-## Toolchain
+| Function | Pin |
+|---|---|
+| CAN RX | PB8, AF4 |
+| CAN TX | PB9, AF4 |
+| TX LED | PA0, lit when high |
+| RX LED | PA1, lit when high |
 
-* GNU Arm Embedded Toolchain
+The system clock is the internal 48 MHz oscillator, trimmed by the clock recovery system (CRS) from the USB start-of-frame packets.
 
+## Build
+
+Needs the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and GNU make.
+
+```
+make
+```
+
+The firmware lands in `build/pcan_canable.elf`, `.hex` and `.bin`; `make OPT=-Og DEBUG=1` builds a debug image.
+
+## Flash
+
+With an ST-Link on the SWD pads and STM32CubeProgrammer:
+
+```
+STM32_Programmer_CLI -c port=SWD mode=UR -w build/pcan_canable.bin 0x08000000 -v -rst
+```
 
 License
 ----

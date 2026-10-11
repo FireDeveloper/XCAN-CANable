@@ -9,14 +9,13 @@
 ######################################
 # target
 ######################################
-TARGET = pcan_$(BOARD)_hw
-TARGET_VARIANT = $(shell echo $(BOARD) | tr  '[:lower:]' '[:upper:]')
+TARGET = pcan_canable
 
 #######################################
 # paths
 #######################################
 # Build path
-BUILD_DIR = build-$(BOARD)
+BUILD_DIR = build
 
 ######################################
 # source
@@ -47,7 +46,7 @@ Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c \
 
 # ASM sources
 ASM_SOURCES =  \
-startup_stm32f042x6.s
+startup_stm32f072xb.s
 
 
 #######################################
@@ -85,16 +84,18 @@ CPU = -mcpu=cortex-m0
 # mcu
 MCU = $(CPU) -mthumb $(FPU) $(FLOAT-ABI)
 
+# optimization, override with make OPT=-Og
+OPT ?= -Os
+
 # macros for gcc
 # AS defines
-AS_DEFS = 
+AS_DEFS =
 
 # C defines
 C_DEFS =  \
 -DUSE_HAL_DRIVER \
--DSTM32F042x6 \
--DNDEBUG \
-$(BOARD_DEFS)
+-DSTM32F072xB \
+-DNDEBUG
 
 
 # AS includes
@@ -112,9 +113,7 @@ C_INCLUDES =  \
 # compile gcc flags
 ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fno-common -fdata-sections -ffunction-sections
 
-CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -Wall -Wpedantic -Wextra -fno-common -fdata-sections -ffunction-sections -std=c99 \
-$(BOARD_FLAGS) \
--D$(TARGET_VARIANT)
+CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -Wall -Wpedantic -Wextra -fno-common -fdata-sections -ffunction-sections -std=c99
 
 ifeq ($(DEBUG), 1)
 CFLAGS += -g -gdwarf-2
@@ -129,7 +128,7 @@ CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 # LDFLAGS
 #######################################
 # link script
-LDSCRIPT = STM32F042C6Tx_FLASH.ld
+LDSCRIPT = STM32F072C8Tx_FLASH.ld
 
 # libraries
 LIBS = -lc -lm -lnosys 
@@ -138,23 +137,8 @@ LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BU
 
 .PHONY : all
 
-# default action: build all
-all: cantact_16 cantact_8 entree canable
-
-cantact_16:
-	$(MAKE) BOARD=cantact_16 DEBUG=0 OPT=-Os BOARD_FLAGS='-DHSE_VALUE=16000000' elf hex bin
-
-cantact_8:
-	$(MAKE) BOARD=cantact_8 DEBUG=0 OPT=-Os BOARD_FLAGS='-DHSE_VALUE=8000000' elf hex bin
-
-entree:
-	$(MAKE) BOARD=entree DEBUG=0 OPT=-Os BOARD_FLAGS='-DHSE_VALUE=0' elf hex bin
-
-canable: 
-	$(MAKE) BOARD=canable DEBUG=0 OPT=-Os BOARD_FLAGS='-DHSE_VALUE=0' elf hex bin
-
-ollie:
-	$(MAKE) BOARD=ollie DEBUG=0 OPT=-Os BOARD_FLAGS='-DHSE_VALUE=16000000' elf hex bin
+# default action: build elf, hex and bin
+all: elf hex bin
 
 #######################################
 # build the application
@@ -199,10 +183,10 @@ hex: $(HEX_TARGET)
 # clean up
 #######################################
 clean:
-	-rm -fR $(BUILD_DIR)*
+	-rm -fR $(BUILD_DIR)
 
 clean_obj:
-	-rm -f $(BUILD_DIR)*/*.o $(BUILD_DIR)*/*.d $(BUILD_DIR)*/*.lst
+	-rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d $(BUILD_DIR)/*.lst
 
 #######################################
 # dependencies
