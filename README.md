@@ -150,26 +150,27 @@ The serial number is the XOR of the 32-bit words of the STM32's 96-bit unique ID
 
 | File | Role |
 |---|---|
-| `Src/main.c` | Clock setup and the main loop |
-| `Src/pcan_can.c` | CAN controller: interrupt, receive ring, transmit queue and mailboxes, bus state, error events |
-| `Src/pcan_protocol.c` | Protocol: host commands, USB record packing, bus state and error reports, timestamps in records |
-| `Src/pcan_usb.c` | USB device class: endpoints, data flow control, vendor requests |
-| `Src/pcan_led.c` | LED modes and blinking |
-| `Src/pcan_timestamp.c` | 42.67 µs timer and millisecond time |
-| `Src/pcan_varian.h` | Board pins |
-| `Src/usbd_desc.c` | USB device descriptor and strings |
-| `STM32F072C8Tx_FLASH.ld` | Memory layout, including the fixed address of the USB device descriptor |
+| `src/Src/main.c` | Clock setup and the main loop |
+| `src/Src/pcan_can.c` | CAN controller: interrupt, receive ring, transmit queue and mailboxes, bus state, error events |
+| `src/Src/pcan_protocol.c` | Protocol: host commands, USB record packing, bus state and error reports, timestamps in records |
+| `src/Src/pcan_usb.c` | USB device class: endpoints, data flow control, vendor requests |
+| `src/Src/pcan_led.c` | LED modes and blinking |
+| `src/Src/pcan_timestamp.c` | 42.67 µs timer and millisecond time |
+| `src/Src/pcan_varian.h` | Board pins |
+| `src/Src/usbd_desc.c` | USB device descriptor and strings |
+| `src/Makefile` | Build: sources, compiler flags, output in `src/build/` |
+| `src/STM32F072C8Tx_FLASH.ld` | Memory layout, including the fixed address of the USB device descriptor |
 | `utilities/usb_id.py` | Shows or sets the USB IDs in a built image |
 
 ## Build
 
-Needs the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and GNU make.
+Needs the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and GNU make. The Makefile lives in `src/`; from the repository root:
 
 ```
-make
+make -C src
 ```
 
-The firmware lands in `build/pcan_canable.elf`, `.hex` and `.bin`. `make OPT=-Og DEBUG=1` builds a debug image.
+The firmware lands in `src/build/pcan_canable.elf`, `.hex` and `.bin`. `make -C src OPT=-Og DEBUG=1` builds a debug image.
 
 Every push and pull request to `master` and `develop` is built by GitHub Actions. The run checks that the USB device descriptor sits at its fixed address, then attaches the `.elf`, `.hex`, `.bin` and `utilities/usb_id.py` as the `pcan_canable` artifact.
 
@@ -206,7 +207,7 @@ The tool needs Python 3 and nothing else. It handles `.bin` and `.hex`, rewritin
 With an ST-Link on the board's SWD pads and STM32CubeProgrammer:
 
 ```
-STM32_Programmer_CLI -c port=SWD mode=UR -w build/pcan_canable.bin 0x08000000 -v -rst
+STM32_Programmer_CLI -c port=SWD mode=UR -w src/build/pcan_canable.bin 0x08000000 -v -rst
 ```
 
 ### USB DFU
@@ -214,13 +215,13 @@ STM32_Programmer_CLI -c port=SWD mode=UR -w build/pcan_canable.bin 0x08000000 -v
 The STM32F072 has a USB DFU bootloader in system memory. Hold BOOT0 (pin 44) high while plugging in USB, then:
 
 ```
-STM32_Programmer_CLI -c port=usb1 -w build/pcan_canable.bin 0x08000000 -v -rst
+STM32_Programmer_CLI -c port=usb1 -w src/build/pcan_canable.bin 0x08000000 -v -rst
 ```
 
 or with dfu-util:
 
 ```
-dfu-util -a 0 -s 0x08000000:leave -D build/pcan_canable.bin
+dfu-util -a 0 -s 0x08000000:leave -D src/build/pcan_canable.bin
 ```
 
 ## Using it
@@ -259,4 +260,4 @@ cansend can0 123#DEADBEEF
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The vendored code under `Drivers/` and `Middlewares/`, and the STMicroelectronics startup, system and linker files, keep their own licenses.
+MIT, see [LICENSE](LICENSE). The vendored code under `src/Drivers/` and `src/Middlewares/`, and the STMicroelectronics startup, system and linker files, keep their own licenses.

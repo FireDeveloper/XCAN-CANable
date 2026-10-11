@@ -18,11 +18,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
 
       - name: build firmware
-        run: make
+        run: make -C src # the Makefile lives in src/; the images land in src/build/
 
       #? Users set their own USB IDs in the downloaded image with utilities/usb_id.py, which needs the descriptor at its fixed address.
       - name: check the USB descriptor location
-        run: python3 utilities/usb_id.py build/pcan_canable.bin && python3 utilities/usb_id.py build/pcan_canable.hex # fails if the descriptor moved
+        run: >-
+          python3 utilities/usb_id.py src/build/pcan_canable.bin
+          && python3 utilities/usb_id.py src/build/pcan_canable.hex
 
       - name: upload firmware
         uses: actions/upload-artifact@v4
@@ -30,9 +32,9 @@ jobs:
           name: pcan_canable
           retention-days: 90 # how long the run keeps the download
           path: |
-            build/pcan_canable.elf
-            build/pcan_canable.hex
-            build/pcan_canable.bin
+            src/build/pcan_canable.elf
+            src/build/pcan_canable.hex
+            src/build/pcan_canable.bin
             utilities/usb_id.py
 
   #? Branch pushes and pull requests stop at the build artifact; only a version tag (v1.0.0) on a master commit publishes a GitHub Release.
@@ -58,11 +60,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: pcan_canable
-          path: dist # build/ and utilities/ land under dist/
+          path: dist # src/build/ and utilities/ land under dist/
 
       - name: name the files after the tag
         run: |
-          for ext in bin hex elf; do mv "dist/build/pcan_canable.$ext" "dist/xcan-canable-$GITHUB_REF_NAME.$ext"; done # xcan-canable-v1.0.0.bin and so on
+          for ext in bin hex elf; do mv "dist/src/build/pcan_canable.$ext" "dist/xcan-canable-$GITHUB_REF_NAME.$ext"; done # xcan-canable-v1.0.0.bin and so on
           mv dist/utilities/usb_id.py dist/usb_id.py # the ID tool next to the images
 
       - name: publish the release

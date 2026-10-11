@@ -1,12 +1,12 @@
 """Show or set the USB vendor and product IDs in an XCAN firmware image (.bin or .hex), without a rebuild.
 
-The firmware keeps its 18-byte USB device descriptor at flash address 0x08000100 (see STM32F072C8Tx_FLASH.ld).
+The firmware keeps its 18-byte USB device descriptor at flash address 0x08000100 (see src/STM32F072C8Tx_FLASH.ld).
 The IDs therefore sit at the same place in every build: the vendor ID at 0x08000108, the product ID at 0x0800010A, both little-endian.
 
 Usage:
-    python utilities/usb_id.py build/pcan_canable.bin                            show the IDs
-    python utilities/usb_id.py build/pcan_canable.hex --vid 0x1234 --pid 0x5678  set them in the image
-    python utilities/usb_id.py build/pcan_canable.bin --pid 0x5678 -o board.bin  write a patched copy
+    python utilities/usb_id.py src/build/pcan_canable.bin                            show the IDs
+    python utilities/usb_id.py src/build/pcan_canable.hex --vid 0x1234 --pid 0x5678  set them in the image
+    python utilities/usb_id.py src/build/pcan_canable.bin --pid 0x5678 -o board.bin  write a patched copy
 """
 
 import argparse
@@ -15,7 +15,7 @@ import sys
 #& Constants
 
 FLASH_BASE = 0x08000000  # address of the first image byte in the MCU's memory map
-DESC_ADDR = 0x08000100  # USB device descriptor, placed by STM32F072C8Tx_FLASH.ld
+DESC_ADDR = 0x08000100  # USB device descriptor, placed by src/STM32F072C8Tx_FLASH.ld
 VID_ADDR = DESC_ADDR + 8  # idVendor, little-endian
 PID_ADDR = DESC_ADDR + 10  # idProduct, little-endian
 DESC_HEADER = bytes((0x12, 0x01))  # bLength 18, bDescriptorType DEVICE
