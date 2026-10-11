@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned runner image, so a toolchain update never changes a build unannounced
 
     steps:
       - uses: actions/checkout@v4
@@ -19,11 +19,17 @@ jobs:
       - name: build firmware
         run: make
 
+      #? Users set their own USB IDs in the downloaded image with utilities/usb_id.py, which needs the descriptor at its fixed address.
+      - name: check the USB descriptor location
+        run: python3 utilities/usb_id.py build/pcan_canable.bin && python3 utilities/usb_id.py build/pcan_canable.hex # fails if the descriptor moved
+
       - name: upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: pcan_canable
+          retention-days: 90 # how long the run keeps the download
           path: |
             build/pcan_canable.elf
             build/pcan_canable.hex
             build/pcan_canable.bin
+            utilities/usb_id.py

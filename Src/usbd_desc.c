@@ -1,8 +1,8 @@
 #include "usbd_core.h"
 #include "usbd_conf.h"
 
-#define USBD_VID                    0x0483
-#define USBD_PID_FS                 0x000C   
+#define USBD_VID                    0x0483 // default vendor ID; utilities/usb_id.py sets another in a built image
+#define USBD_PID_FS                 0x000C // default product ID; utilities/usb_id.py sets another in a built image
 #define USBD_LANGID_STRING          1033
 #define USBD_MAX_STR_DESC_SIZ       0x100U
 
@@ -14,7 +14,9 @@ uint8_t * USBD_FS_SerialStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
 uint8_t * USBD_FS_ConfigStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
 uint8_t * USBD_FS_InterfaceStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
 
-__ALIGN_BEGIN uint8_t USBD_FS_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END =
+//? The device descriptor sits at a fixed flash address, 0x08000100, where STM32F072C8Tx_FLASH.ld places the .usb_device_desc section.
+//? utilities/usb_id.py sets the VID and PID there in a built .bin or .hex, without a rebuild.
+__ALIGN_BEGIN const uint8_t USBD_FS_DeviceDesc[USB_LEN_DEV_DESC] __attribute__(( section( ".usb_device_desc" ) )) __ALIGN_END =
 {
   0x12,                       /*bLength */
   USB_DESC_TYPE_DEVICE,       /*bDescriptorType*/
@@ -48,7 +50,7 @@ uint8_t * USBD_FS_DeviceDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
 {
   UNUSED(speed);
   *length = sizeof(USBD_FS_DeviceDesc);
-  return USBD_FS_DeviceDesc;
+  return (uint8_t*)USBD_FS_DeviceDesc; // the USB stack only reads it, straight from flash
 }
 
 uint8_t * USBD_FS_LangIDStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)

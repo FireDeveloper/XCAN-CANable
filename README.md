@@ -16,6 +16,7 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 - Single-shot transmission, listen-only mode and 42.67 µs timestamps.
 - When USB falls behind, frames wait in a receive buffer and transmission with echo slows down to match, so echoes are not dropped.
 - Serial number derived from the chip's unique ID; LED identify on request.
+- USB vendor and product IDs at a fixed place in the image: set your own in a downloaded `.bin` or `.hex` with `utilities/usb_id.py`, no rebuild needed.
 
 ## Hardware
 
@@ -27,7 +28,7 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 | CAN | bxCAN, RX on PB8 and TX on PB9 (AF4) |
 | TX LED | PA0, lit when high |
 | RX LED | PA1, lit when high |
-| USB | Full speed, device descriptor in `Src/usbd_desc.c` |
+| USB | Full speed, device descriptor at flash address 0x08000100 (see [USB IDs](#usb-ids)) |
 
 | Situation | TX LED | RX LED |
 |---|---|---|
@@ -64,7 +65,7 @@ When the host floods the bus, the board sends back to back. Nodes whose frames h
 | Resource | Size |
 |---|---|
 | Flash | 16,868 bytes of 65,536 (26%) |
-| RAM, static | 10,336 bytes of 16,384 |
+| RAM, static | 10,312 bytes of 16,384 |
 | Stack reserve | 2,048 bytes |
 | Transmit queue | 100 frames |
 | Receive buffer | 128 frames or echoes |
@@ -157,6 +158,8 @@ The serial number is the XOR of the 32-bit words of the STM32's 96-bit unique ID
 | `Src/pcan_timestamp.c` | 42.67 µs timer and millisecond time |
 | `Src/pcan_varian.h` | Board pins |
 | `Src/usbd_desc.c` | USB device descriptor and strings |
+| `STM32F072C8Tx_FLASH.ld` | Memory layout, including the fixed address of the USB device descriptor |
+| `utilities/usb_id.py` | Shows or sets the USB IDs in a built image |
 
 ## Build
 
@@ -168,7 +171,26 @@ make
 
 The firmware lands in `build/pcan_canable.elf`, `.hex` and `.bin`. `make OPT=-Og DEBUG=1` builds a debug image.
 
-Every push and pull request to `master` and `develop` is built by GitHub Actions; the `.elf`, `.hex` and `.bin` are attached to the run as the `pcan_canable` artifact.
+Every push and pull request to `master` and `develop` is built by GitHub Actions. The run checks that the USB device descriptor sits at its fixed address, then attaches the `.elf`, `.hex`, `.bin` and `utilities/usb_id.py` as the `pcan_canable` artifact.
+
+## USB IDs
+
+The firmware keeps its USB device descriptor at a fixed flash address, 0x08000100, so the vendor and product IDs sit at the same place in every build:
+
+| Field | Flash address | Offset in the `.bin` |
+|---|---|---|
+| Vendor ID (idVendor) | 0x08000108 | 0x108 |
+| Product ID (idProduct) | 0x0800010A | 0x10A |
+
+Both are 16-bit little-endian. A build carries the default IDs, 0x0483 and 0x000C. Set the IDs your host driver expects in the image itself, without a rebuild:
+
+```
+python utilities/usb_id.py pcan_canable.bin                            # show the IDs
+python utilities/usb_id.py pcan_canable.hex --vid 0x1234 --pid 0x5678  # set them in the image
+python utilities/usb_id.py pcan_canable.bin --pid 0x5678 -o board.bin  # write a patched copy
+```
+
+The tool needs Python 3 and nothing else. It handles `.bin` and `.hex`, rewriting only the `.hex` records it changes with fresh checksums, and it refuses an image without a device descriptor at 0x08000100. Flash the patched image as below.
 
 ## Flash
 

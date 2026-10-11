@@ -76,6 +76,14 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
+  /* The USB device descriptor at a fixed address, 0x100 into the image, so utilities/usb_id.py can set the VID and PID in a built .bin or .hex */
+  .usb_device_desc ORIGIN(FLASH) + 0x100 :
+  {
+    KEEP(*(.usb_device_desc))
+    . = ALIGN(4);
+  } >FLASH
+  ASSERT( SIZEOF(.usb_device_desc) == 20, "the USB device descriptor section must hold the 18-byte descriptor" )
+
   /* The program code and other data goes into FLASH */
   .text :
   {
