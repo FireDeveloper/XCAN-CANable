@@ -201,14 +201,20 @@ void pcan_record_buffer_reset( PCAN_RECORD_BUFFER_EX *prec )
   prec->pos = HEADER_SIZE;
 }
 
-/* request free slot for specific amount of data */
-uint8_t *pcan_record_buffer_request( PCAN_RECORD_BUFFER_EX *prec, uint16_t size )
+/**
+ * @brief Reserve room for one record in the USB record buffer.
+ * @param[in,out] prec Record buffer; a new 64-byte block with its header opens when the current block cannot take @p size bytes.
+ * @param[in]     size Bytes the record needs, at most BLOCK_SIZE - HEADER_SIZE.
+ * @return Where the record goes, or NULL when @p size is too large or the buffer is full.
+ * @note The record counts only once pcan_record_buffer_commit() runs.
+ */
+static uint8_t *pcan_record_buffer_request( PCAN_RECORD_BUFFER_EX *prec, uint16_t size )
 {
   if( size > (BLOCK_SIZE-HEADER_SIZE) )
     return 0;
   uint16_t unused = BLOCK_SIZE - ( prec->pos & (BLOCK_SIZE-1) );
-  /* allocate new slot ? */
-  if( unused < size )
+  //? pos on a block boundary means the previous record filled its block exactly, and the next block has no header yet.
+  if( ( unused < size ) || ( unused == BLOCK_SIZE ) ) // open a new block when this one is short or full
   {
     /* align data to next slot bound */
     uint16_t next = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1)));
@@ -318,6 +324,12 @@ static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
 }
 
 #define BUFFER_MINIMAL_GAP_SIZE (16u)
+/**
+ * @brief Append a received or echoed CAN frame to the USB record buffer.
+ * @param[in,out] prec Record buffer; flushed to USB first when it has no room.
+ * @param[in]     msg  Frame to record; a DLC above 8 is recorded as 8.
+ * @note A frame that finds no room even after a flush is dropped and latches PCAN_USB_ERROR_RXQOVR.
+ */
 static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t *msg )
 {
   uint8_t *ptr, pos = 0;
@@ -337,7 +349,8 @@ static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t 
       return;
   }
   /* recheck dlc for abnormal frames... */
-  uint8_t sl = msg->dlc > 8 ? 8: msg->dlc;
+  uint8_t len = msg->dlc > 8 ? 8: msg->dlc; // data bytes on the wire, a DLC of 9-15 carries 8
+  uint8_t sl = len; // record DLC matches the bytes written
 
   if( msg->flags & CAN_FLAG_EXTID )
   {
@@ -398,13 +411,14 @@ static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t 
 
   if( !( sl & PCAN_USB_STATUSLEN_RTR ) )
   {
-    memcpy( ptr, msg->data, msg->dlc );
+    memcpy( ptr, msg->data, len ); // copy the clamped payload
 
-    ptr += msg->dlc;
-    pos += msg->dlc;  
+    ptr += len; // past the payload
+    pos += len; // payload bytes written
   }
 
-  if( msg->flags & CAN_FLAG_ECHO )
+  //? The host drivers read the echo id byte only after a data frame's payload, so an RTR echo must not carry it.
+  if( ( msg->flags & CAN_FLAG_ECHO ) && !( sl & PCAN_USB_STATUSLEN_RTR ) ) // echo id byte follows data frames only
   {
     pack_u8( ptr, msg->dummy );
     ptr += 1;
@@ -439,6 +453,14 @@ static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
 }
 
 #define WAIT_FOR_TXSLOTS 1
+/**
+ * @brief Decode one CAN frame record from the host and queue it for transmission.
+ * @param[in] ptr   Record bytes after its status/length byte.
+ * @param[in] size  Bytes left in the USB packet from @p ptr on.
+ * @param[in] flags The record's status/length byte.
+ * @return Bytes left in the packet after this record; 0 when the bus is off or the record is truncated.
+ * @note While the TX FIFO is full this waits up to 1 s for room, then drops the frame and latches PCAN_USB_ERROR_TXFULL.
+ */
 static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flags  )
 {
   can_message_t msg = { 0 };
@@ -481,16 +503,17 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
 
   /* check for MAX DLC */
   msg.dlc = rec_len < 8 ? rec_len: 8;
-  
-  if( size < rec_len )
-      return 0;
 
   if( !( flags & PCAN_USB_STATUSLEN_RTR ) )
   {
+    //? The host sends at most 8 data bytes, and an RTR record sends none, so only a data frame's payload is checked and skipped.
+    if( size < msg.dlc )
+      return 0; // truncated payload
+
     memcpy( msg.data, ptr, msg.dlc );
 
-    ptr  += rec_len;
-    size -= rec_len;
+    ptr  += msg.dlc; // past the payload
+    size -= msg.dlc; // payload bytes consumed
   }
   else
   {

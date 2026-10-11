@@ -158,9 +158,17 @@ static int pcan_try_send_message( const can_message_t *p_msg )
   return txMailbox;
 }
 
+/**
+ * @brief Move the oldest queued frame into a free TX mailbox.
+ * @note Does nothing while the controller is stopped, so a closed channel never loads a mailbox.
+ */
 static void pcan_can_flush_tx( void )
 {
   can_message_t *p_msg;
+
+  //- Hold queued frames while the controller is stopped
+  if( HAL_CAN_GetState( &g_hcan ) != HAL_CAN_STATE_LISTENING )
+    return; // bus off, frames stay queued
 
   /* empty fifo */
   if( can_dev.tx_head == can_dev.tx_tail )
@@ -215,17 +223,34 @@ void pcan_can_set_loopback( uint8_t loopback )
   }
 }
 
+/**
+ * @brief Drop every frame still queued for transmission.
+ */
+static void pcan_can_tx_fifo_clear( void )
+{
+  can_dev.tx_head = 0; // empty the software TX FIFO
+  can_dev.tx_tail = 0; // read index follows the write index
+}
+
 void pcan_can_set_bus_active( uint16_t mode )
 {
   if( mode )
   {
-    HAL_CAN_Start( &g_hcan );
-    HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 );
+    //- Drop what an earlier session left queued
+    pcan_can_tx_fifo_clear(); // forget queued frames
+    HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // empty the mailboxes before joining
+
+    //- Join the bus
+    if( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_ERROR )
+      HAL_CAN_Init( &g_hcan ); // leave the error state a failed start or stop left behind
+    HAL_CAN_Start( &g_hcan ); // leave init mode
   }
   else
   {
-    HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 );
-    HAL_CAN_Stop( &g_hcan );
+    //- Leave the bus and drop pending frames
+    HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // cancel pending mailbox requests
+    HAL_CAN_Stop( &g_hcan ); // enter init mode once the frame on the wire ends
+    pcan_can_tx_fifo_clear(); // nothing queued outlives the session
   }
 }
 

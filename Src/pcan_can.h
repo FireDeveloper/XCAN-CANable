@@ -42,6 +42,12 @@ void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t s
 int pcan_can_send_message( const can_message_t *msg );
 void pcan_can_install_rx_callback( void (*cb)( can_message_t * ) );
 void pcan_can_install_error_callback( void (*cb)( uint8_t, uint8_t, uint8_t ) );
+
+/**
+ * @brief Join or leave the CAN bus.
+ * @param[in] mode Non-zero joins the bus, zero leaves it.
+ * @note Both directions drop the frames still queued for transmission, so frames from an earlier session never reach the bus.
+ */
 void pcan_can_set_bus_active( uint16_t mode );
 
 /**
