@@ -259,4 +259,4 @@ cansend can0 123#DEADBEEF
 
 ## License
 
-WTFPL
+MIT, see [LICENSE](LICENSE). The vendored code under `Drivers/` and `Middlewares/`, and the STMicroelectronics startup, system and linker files, keep their own licenses.
