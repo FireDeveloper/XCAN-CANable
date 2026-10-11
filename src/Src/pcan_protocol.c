@@ -16,6 +16,8 @@ static struct
   uint8_t bus_active;
   uint8_t ext_vcc_state;
   uint8_t led_mode;
+  uint8_t led_tx_activity; // a frame went to the TX FIFO since the last pcan_protocol_poll()
+  uint8_t led_rx_activity; // a frame from the bus was recorded since the last pcan_protocol_poll()
 
   uint16_t last_timestamp_sync;
   uint16_t last_flush;
@@ -60,8 +62,7 @@ pcan_device =
 #define PCAN_MAX_RECORD_SIZE (BLOCK_SIZE*14)
 typedef struct
 {
-  /* raw data array */
-  uint8_t buffer[PCAN_MAX_RECORD_SIZE];
+  uint8_t *buffer; // the half of pcan_record_halves records go into; USB sends the other one
   /* ts counter, need to provide correct timestamp correction ( 2 or 1 byte ) */
   uint16_t ts_counter;
   uint16_t ts_last; // timestamp of the previous timestamped record in the current block
@@ -69,16 +70,16 @@ typedef struct
 }
 PCAN_RECORD_BUFFER_EX;
 
-static uint8_t temp_data_buffer[PCAN_MAX_RECORD_SIZE] = { 0 };
-static struct t_m2h_fsm data_fsm = 
+//? USB sends one half straight from memory while records fill the other, so a transfer needs no copy.
+static uint8_t pcan_record_halves[2][PCAN_MAX_RECORD_SIZE]; // record storage, swapped at each transfer
+static struct t_m2h_fsm data_fsm =
 {
   .state = 0,
   .ep_addr = PCAN_USB_EP_MSGIN,
-  .pdbuf = temp_data_buffer,
-  .dbsize = sizeof( temp_data_buffer ),
+  .dbsize = PCAN_MAX_RECORD_SIZE, // one whole half per transfer at most
 };
 
-static PCAN_RECORD_BUFFER_EX pcan_records;
+static PCAN_RECORD_BUFFER_EX pcan_records = { .buffer = pcan_record_halves[0] };
 
 void pcan_sja1000_write( uint8_t reg_addr, uint8_t value )
 {
@@ -206,6 +207,19 @@ void pcan_record_buffer_reset( PCAN_RECORD_BUFFER_EX *prec )
 }
 
 /**
+ * @brief Close the current block: zero the bytes its records left unused and move to the next block boundary.
+ * @param[in,out] prec Record buffer; a position already on a boundary stays where it is.
+ * @note A block is not zeroed when it opens, so this writes the only padding the host receives.
+ */
+static void pcan_record_block_close( PCAN_RECORD_BUFFER_EX *prec )
+{
+  uint16_t next = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // the next block boundary
+
+  memset( &prec->buffer[prec->pos], 0x00, next - prec->pos ); // padding after the block's last record
+  prec->pos = next; // the next record opens a new block
+}
+
+/**
  * @brief Reserve room for one record in the USB record buffer.
  * @param[in,out] prec Record buffer; a new 64-byte block with its header opens when the current block cannot take @p size bytes.
  * @param[in]     size Bytes the record needs, at most BLOCK_SIZE - HEADER_SIZE.
@@ -224,7 +238,7 @@ static uint8_t *pcan_record_buffer_request( PCAN_RECORD_BUFFER_EX *prec, uint16_
     uint16_t next = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1)));
     if( (next+HEADER_SIZE) >= PCAN_MAX_RECORD_SIZE )
       return 0;
-    memset( &prec->buffer[next], 0x00, BLOCK_SIZE );
+    pcan_record_block_close( prec ); // pad the block the record does not fit in
     pcan_record_write_header( &prec->buffer[next] );
     next += 2;
     prec->pos = next;
@@ -246,10 +260,20 @@ void pcan_record_buffer_commit( PCAN_RECORD_BUFFER_EX *prec, uint16_t size )
   prec->pos += size;
 }
 
-uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
+/**
+ * @brief Send the records collected so far to the host, or end a finished transfer with a ZLP.
+ * @param[in,out] prec Record buffer; after a send, records go into the other half of pcan_record_halves.
+ * @return 1 when a transfer of records started, 0 when nothing was sent or USB still sends the previous transfer.
+ * @note The last block goes out whole, its unused tail zeroed; the ZLP follows 800 us after the last transfer once no records come.
+ */
+static uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
 {
   uint16_t ts_ticks = pcan_timestamp_ticks();
   int res, flush_size;
+
+  //- Wait while USB still sends the other half
+  if( pcan_flush_data_busy( &data_fsm ) )
+    return 0; // the next call tries again
 
   if( prec->pos <= HEADER_SIZE )
   {
@@ -265,10 +289,13 @@ uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
     return 0;
   }
 
-  flush_size = ( prec->pos + (BLOCK_SIZE-1) ) & (~((BLOCK_SIZE-1)));
+  //- Send whole blocks straight from this half, then fill the other half
+  pcan_record_block_close( prec ); // zero the last block's unused tail
+  flush_size = prec->pos; // whole 64-byte blocks
   res = pcan_flush_data( &data_fsm, prec->buffer, flush_size );
   if( res )
   {
+    prec->buffer = ( prec->buffer == pcan_record_halves[0] ) ? pcan_record_halves[1] : pcan_record_halves[0]; // USB reads the sent half until DataIn
     pcan_record_buffer_reset( prec );
     pcan_device.last_flush = ts_ticks;
     pcan_device.zlp_pending = 1; // a whole number of 64-byte packets needs a ZLP to end the host's transfer
@@ -288,7 +315,7 @@ static void pcan_record_timestamp_guard( PCAN_RECORD_BUFFER_EX *prec, uint16_t t
 {
   //? The host rebuilds a 1-byte timestamp from the previous record's, which only works while records are less than 256 ticks apart and in order.
   if( prec->ts_counter && ( (uint16_t)( ts - prec->ts_last ) > 0xFFu ) )
-    prec->pos = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // close the block
+    pcan_record_block_close( prec ); // the record opens a new block
 }
 
 /**
@@ -375,7 +402,6 @@ static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
   return 1; // record appended
 }
 
-#define BUFFER_MINIMAL_GAP_SIZE (16u)
 /**
  * @brief Append a received or echoed CAN frame to the USB record buffer.
  * @param[in,out] prec Record buffer; flushed to USB first when it has no room.
@@ -387,15 +413,25 @@ static uint8_t pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message
 {
   uint8_t *ptr, pos = 0;
 
+  //- Size the record
+  /* recheck dlc for abnormal frames... */
+  uint8_t len = msg->dlc > 8 ? 8: msg->dlc; // data bytes on the wire, a DLC of 9-15 carries 8
+  uint8_t is_rtr = ( msg->flags & CAN_FLAG_RTR ) != 0; // a remote frame carries no payload and no echo id
+  //? Reserving this record's length rather than the longest record's packs more records into each 64-byte USB packet.
+  uint8_t size = 1u + ( ( msg->flags & CAN_FLAG_EXTID ) ? 4u : 2u ) + 2u; // status, identifier and the timestamp at its longest
+  size += is_rtr ? 0u : len; // payload
+  size += ( ( msg->flags & CAN_FLAG_ECHO ) && !is_rtr ) ? 1u : 0u; // echo id byte
+
+  //- Reserve room, flushing a full buffer to USB first
   pcan_record_timestamp_guard( prec, msg->timestamp ); // keep the 1-byte timestamp decodable
-  ptr = pcan_record_buffer_request( prec, BUFFER_MINIMAL_GAP_SIZE );
+  ptr = pcan_record_buffer_request( prec, size );
   /* wow ! too fast too furious !!! */
   if( !ptr )
   {
     //? Refusing the frame leaves it in the CAN layer's RX ring, which also holds back frames that ask for an echo.
     if( !pcan_record_buffer_flush( prec ) )
       return 0; // USB still sends the previous transfer; pcan_can_poll() offers the frame again
-    ptr = pcan_record_buffer_request( prec, BUFFER_MINIMAL_GAP_SIZE );
+    ptr = pcan_record_buffer_request( prec, size );
     /* o_0 */
     if( !ptr )
     {
@@ -403,8 +439,8 @@ static uint8_t pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message
       return 1; // frame dropped
     }
   }
-  /* recheck dlc for abnormal frames... */
-  uint8_t len = msg->dlc > 8 ? 8: msg->dlc; // data bytes on the wire, a DLC of 9-15 carries 8
+
+  //- Write the record
   uint8_t sl = len; // record DLC matches the bytes written
 
   if( msg->flags & CAN_FLAG_EXTID )
@@ -486,7 +522,7 @@ static int pcan_rx_message( const can_message_t *msg )
     return 0; // USB buffer full: the frame stays queued
   if( ( msg->flags & CAN_FLAG_ECHO ) == 0 )
   {
-    pcan_led_set_mode( LED_CH0_RX, LED_MODE_BLINK_FAST, 237 );
+    pcan_device.led_rx_activity = 1; // pcan_protocol_poll() blinks the RX LED
   }
   return 1; // recorded
 }
@@ -557,7 +593,8 @@ static void pcan_can_error( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_
  */
 static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flags  )
 {
-  can_message_t msg = { 0 };
+  //? Only the fields the CAN layer reads are set; payload bytes past the DLC never reach the bus or the host, so the frame is not zeroed for every record.
+  can_message_t msg;
   uint8_t rec_len = flags & PCAN_USB_STATUSLEN_DLC;
   /* return back frame to PC */
   uint8_t srr_flag = 0;
@@ -565,6 +602,9 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
 
   if( !pcan_device.bus_active )
     return 0;
+
+  msg.flags = 0; // a standard data frame until the record says otherwise
+  msg.dummy = 0; // no echo id unless the host asks for an echo
 
   if( flags & PCAN_USB_STATUSLEN_EXT_ID )
   {
@@ -637,7 +677,7 @@ static uint8_t pcan_decode_data_frame( uint8_t *ptr, uint16_t size, uint8_t flag
 
   msg.timestamp = pcan_timestamp_ticks();
 
-  pcan_led_set_mode( LED_CH0_TX, LED_MODE_BLINK_FAST, 237 );
+  pcan_device.led_tx_activity = 1; // pcan_protocol_poll() blinks the TX LED
 
   //? pcan_protocol_data_ready() pauses the data endpoint before the FIFO can fill, so a full FIFO here means a packet slipped past that pause.
   if( pcan_can_send_message( &msg ) < 0 )
@@ -718,7 +758,7 @@ static void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
   //? The Linux CAN Driver takes its clock reference only from a timesync record that opens a block.
   //? A 1-byte timestamp behind a timesync takes its high byte from the timesync and its wrap check from the frame before, so it can decode 256 ticks off.
   if( ( prec->pos & (BLOCK_SIZE-1) ) != HEADER_SIZE )
-    prec->pos = ( prec->pos + (BLOCK_SIZE-1) ) & (~((uint16_t)(BLOCK_SIZE-1))); // close the block holding earlier records
+    pcan_record_block_close( prec ); // close the block holding earlier records
 
   ptr = pcan_record_buffer_request( prec, 5 );
   if( !ptr )
@@ -1010,6 +1050,15 @@ void pcan_protocol_init( void )
 void pcan_protocol_poll( void )
 {
   uint16_t ts_ms = pcan_timestamp_ticks();
+
+  //- Blink the LEDs for the traffic since the last pass while the channel is open
+  //? pcan_led_set_mode() reads the millisecond clock and rewrites the blink state, too much work to repeat for every frame.
+  if( pcan_device.bus_active && pcan_device.led_tx_activity )
+    pcan_led_set_mode( LED_CH0_TX, LED_MODE_BLINK_FAST, 237 ); // frames queued for the bus
+  if( pcan_device.bus_active && pcan_device.led_rx_activity )
+    pcan_led_set_mode( LED_CH0_RX, LED_MODE_BLINK_FAST, 237 ); // frames came from the bus
+  pcan_device.led_tx_activity = 0; // traffic shown, or dropped with the channel closed
+  pcan_device.led_rx_activity = 0;
 
   if( pcan_device.bus_active  )
   {

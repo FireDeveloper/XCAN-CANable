@@ -458,19 +458,30 @@ int pcan_flush_data( struct t_m2h_fsm *pfsm, void *src, int size )
       assert( p_data->ep_tx_in_use[pfsm->ep_addr&0x0F] == 0 );
       if( size > pfsm->dbsize )
         break;
-      if( size )
-        memcpy( pfsm->pdbuf, src, size ); // a ZLP has no source to copy
       p_data->ep_tx_in_use[pfsm->ep_addr&0x0F] = 1;
       /* prepare data transmit */
       pdev->ep_in[pfsm->ep_addr & EP_ADDR_MSK].total_length = size;
       /* no pending data */
       p_data->ep_tx_data_pending[pfsm->ep_addr&0x0F] = 0;
-      USBD_LL_Transmit( pdev, pfsm->ep_addr, pfsm->pdbuf, size );
-      
+      USBD_LL_Transmit( pdev, pfsm->ep_addr, src, size ); // straight from the caller's buffer, which stays unchanged until DataIn
+
       pfsm->total_tx += size;
       pfsm->state = 1;
       return 1;
   }
-  
+
   return 0;
+}
+
+int pcan_flush_data_busy( const struct t_m2h_fsm *pfsm )
+{
+  USBD_HandleTypeDef *pdev = &hUsbDeviceFS;
+  struct t_class_data *p_data = (void*)pdev->pClassData;
+
+  //- Endpoints exist only once the device is configured
+  if( !p_data )
+    return 1; // nothing can be sent before the host picks a configuration
+
+  //- An earlier transfer still runs until DataIn clears its flag
+  return ( pfsm->state == 1 ) && p_data->ep_tx_in_use[pfsm->ep_addr&0x0F]; // pcan_flush_data() would refuse a new one
 }

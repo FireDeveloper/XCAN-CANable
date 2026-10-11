@@ -39,6 +39,7 @@ static struct
   can_message_t tx_echo[CAN_TX_MAILBOXES]; // frame in each mailbox, echoed to the host once it completes
   uint8_t tx_order[CAN_TX_MAILBOXES]; // loaded mailboxes, oldest first
   volatile uint8_t tx_loaded; // entries in tx_order: mailboxes loaded and not retired yet
+  uint8_t tx_loaded_mask; // bit per mailbox in tx_order
   uint8_t tx_done; // bit per mailbox whose request ended, waiting for pcan_can_tx_retire()
   uint8_t tx_ok; // bit per mailbox whose frame was acknowledged
   uint8_t tx_echo_req; // bit per mailbox whose frame the host asked to have echoed
@@ -52,6 +53,16 @@ static struct
   void (*can_err_cb)( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err );
 }
 can_dev = { 0 };
+
+/**
+ * @brief Tell whether the controller is on the bus.
+ * @return Non-zero from a successful HAL_CAN_Start() until the next stop or init.
+ */
+static inline uint8_t pcan_can_is_started( void )
+{
+  //? HAL_CAN_GetState() also reads the sleep flags, which this firmware never sets, and this runs for every frame.
+  return g_hcan.State == HAL_CAN_STATE_LISTENING; // the HAL's record of a started controller
+}
 
 void pcan_can_init(void)
 {
@@ -206,7 +217,7 @@ void pcan_can_install_error_callback( void (*cb)( uint8_t err, uint8_t bus_err, 
 static void pcan_can_load_mailbox( uint32_t mb, const can_message_t *p_msg )
 {
   CAN_TxMailBox_TypeDef *p_box = &g_hcan.Instance->sTxMailBox[mb]; // the mailbox's registers
-  const uint8_t *p_data = p_msg->data; // payload, first byte first on the wire
+  uint32_t data_low, data_high; // payload bytes 0-3 and 4-7, first byte lowest as TDLR and TDHR take them
   uint32_t tir;
 
   //- Identifier and frame type
@@ -218,23 +229,12 @@ static void pcan_can_load_mailbox( uint32_t mb, const can_message_t *p_msg )
     tir |= CAN_TI0R_RTR; // remote frame
 
   //- Length and payload, then the request
+  memcpy( &data_low, &p_msg->data[0], sizeof( data_low ) ); // bytes 0-3 in one aligned word read
+  memcpy( &data_high, &p_msg->data[4], sizeof( data_high ) ); // bytes 4-7 in one aligned word read
   p_box->TDTR = p_msg->dlc & CAN_TDT0R_DLC; // data length code, no time stamp in the frame
-  p_box->TDLR = (uint32_t)p_data[0] | ( (uint32_t)p_data[1] << 8 ) | ( (uint32_t)p_data[2] << 16 ) | ( (uint32_t)p_data[3] << 24 ); // bytes 0-3
-  p_box->TDHR = (uint32_t)p_data[4] | ( (uint32_t)p_data[5] << 8 ) | ( (uint32_t)p_data[6] << 16 ) | ( (uint32_t)p_data[7] << 24 ); // bytes 4-7
+  p_box->TDLR = data_low; // bytes 0-3
+  p_box->TDHR = data_high; // bytes 4-7
   p_box->TIR = tir | CAN_TI0R_TXRQ; // request transmission once the mailbox holds the whole frame
-}
-
-/**
- * @brief Collect the TX mailboxes that hold a frame not retired yet.
- * @return Bit per mailbox, bit 0 for mailbox 0.
- */
-static uint8_t pcan_can_tx_loaded_mask( void )
-{
-  uint8_t mask = 0;
-
-  for( uint32_t i = 0; i < can_dev.tx_loaded; ++i )
-    mask |= 1u << can_dev.tx_order[i]; // one bit per loaded mailbox
-  return mask;
 }
 
 /**
@@ -251,13 +251,13 @@ static uint32_t pcan_can_rx_free( void )
  * @brief Move queued frames into the free TX mailboxes, oldest first.
  * @note Does nothing while the controller is stopped, so a closed channel never loads a mailbox.
  * @note Switches automatic retransmission to match a frame's CAN_FLAG_ONESHOT only with no mailbox loaded, as MCR.NART covers every pending frame.
- * @note Keeps each loaded frame so pcan_can_tx_retire() can echo it, and holds back frames that ask for an echo while the RX ring is nearly full.
- * @note Runs in the CAN interrupt only, after each event the HAL handled; pcan_can_poll() raises the interrupt for frames queued while no mailbox was loaded.
+ * @note Keeps each loaded frame that asks for an echo so pcan_can_tx_retire() can echo it, and holds those frames back while the RX ring is nearly full.
+ * @note Runs in the CAN interrupt only, after each event it handled; pcan_can_poll() raises the interrupt for frames queued while no mailbox was loaded.
  */
 static void pcan_can_flush_tx( void )
 {
   //- Hold queued frames while the controller is stopped
-  if( HAL_CAN_GetState( &g_hcan ) != HAL_CAN_STATE_LISTENING )
+  if( !pcan_can_is_started() )
     return; // bus off, frames stay queued
 
   while( can_dev.tx_head != can_dev.tx_tail ) // frames waiting
@@ -267,7 +267,7 @@ static void pcan_can_flush_tx( void )
 
     //- Find a mailbox that is empty and retired
     //? A mailbox reads empty as soon as its frame ends; reloading it before pcan_can_tx_retire() ran would overwrite that frame's echo.
-    uint32_t free_boxes = ( ( g_hcan.Instance->TSR & CAN_TSR_TME ) >> CAN_TSR_TME_Pos ) & ~pcan_can_tx_loaded_mask(); // bit per usable mailbox
+    uint32_t free_boxes = ( ( g_hcan.Instance->TSR & CAN_TSR_TME ) >> CAN_TSR_TME_Pos ) & ~can_dev.tx_loaded_mask; // bit per usable mailbox
     if( !free_boxes )
       return; // every mailbox holds a frame; the next completion calls this again
 
@@ -292,13 +292,18 @@ static void pcan_can_flush_tx( void )
     //- Track the frame, then load it
     uint32_t mb = ( free_boxes & 1u ) ? 0u : ( ( free_boxes & 2u ) ? 1u : 2u ); // lowest usable mailbox
     uint8_t bit = 1u << mb; // its bit in the masks
-    can_dev.tx_echo[mb] = *p_msg; // kept until the frame ends
     if( p_msg->flags & CAN_FLAG_ECHO )
+    {
+      can_dev.tx_echo[mb] = *p_msg; // kept until the frame ends
       can_dev.tx_echo_req |= bit; // echo only what the host asked for
+    }
     else
-      can_dev.tx_echo_req &= ~bit; // no echo
+    {
+      can_dev.tx_echo_req &= ~bit; // no echo, nothing to keep
+    }
     can_dev.tx_done &= ~bit; // no completion yet
     can_dev.tx_order[can_dev.tx_loaded] = mb; // newest last
+    can_dev.tx_loaded_mask |= bit; // mailbox in flight
     ++can_dev.tx_loaded; // one more mailbox in flight
     pcan_can_load_mailbox( mb, p_msg ); // request transmission
 
@@ -362,6 +367,7 @@ static void pcan_can_tx_fifo_clear( void )
   can_dev.tx_head = 0; // empty the software TX FIFO
   can_dev.tx_tail = 0; // read index follows the write index
   can_dev.tx_loaded = 0; // pcan_can_tx_done() ignores the aborted mailboxes' completions
+  can_dev.tx_loaded_mask = 0; // no mailbox in flight
   can_dev.tx_done = 0; // no completion waits for retirement
   can_dev.tx_echo_req = 0; // an aborted frame is never echoed
 }
@@ -466,6 +472,7 @@ static void pcan_can_tx_retire( void )
     //- Drop it from the load order
     can_dev.tx_order[0] = can_dev.tx_order[1]; // the next oldest moves up
     can_dev.tx_order[1] = can_dev.tx_order[2];
+    can_dev.tx_loaded_mask &= ~bit; // pcan_can_flush_tx() may reload the mailbox
     --can_dev.tx_loaded; // one mailbox fewer in flight
     can_dev.tx_done &= ~bit; // completion handled
     can_dev.tx_ok &= ~bit;
@@ -494,7 +501,7 @@ static void pcan_can_tx_done( uint32_t mb, uint8_t ok )
   uint8_t bit = 1u << mb; // the mailbox's bit in the masks
 
   //- Ignore a completion nobody waits for
-  if( !( pcan_can_tx_loaded_mask() & bit ) )
+  if( !( can_dev.tx_loaded_mask & bit ) )
     return; // an abort from before the last bus-on or bus-off
 
   //- Record the outcome and retire in load order
@@ -507,48 +514,63 @@ static void pcan_can_tx_done( uint32_t mb, uint8_t ok )
 }
 
 /**
- * @brief Read one frame from an RX FIFO into the RX ring, stamped with its arrival time.
- * @param[in,out] hcan CAN handle.
- * @param[in]     fifo CAN_RX_FIFO0 or CAN_RX_FIFO1.
- * @note Runs in the CAN interrupt.
- * @note A frame the HAL refuses to read is released unread and counted in rx_errs.
+ * @brief Move every frame waiting in an RX FIFO into the RX ring, stamped with its arrival time.
+ * @param[in] fifo CAN_RX_FIFO0 or CAN_RX_FIFO1.
+ * @note Runs in the CAN interrupt and reads the FIFO registers directly, so a frame is read in any HAL state and never left to retrigger the interrupt.
+ * @note A frame that finds the ring full is dropped and latches CAN_ERROR_FLAG_RX_OVF.
  */
-static void pcan_can_rx_frame( CAN_HandleTypeDef *hcan, uint32_t fifo )
+static void pcan_can_rx_fifo_drain( uint32_t fifo )
 {
-  CAN_RxHeaderTypeDef hdr = { 0 };
-  can_message_t msg = { 0 };
+  CAN_TypeDef *p_can = g_hcan.Instance; // controller registers
+  //? RF0R and RF1R keep their fill level and release bits at the same positions, so the CAN_RF0R_* masks serve both FIFOs.
+  volatile uint32_t *p_rfr = ( fifo == CAN_RX_FIFO0 ) ? &p_can->RF0R : &p_can->RF1R; // the FIFO's fill level and release register
+  CAN_FIFOMailBox_TypeDef *p_box = &p_can->sFIFOMailBox[fifo]; // the FIFO's output mailbox
 
-  if( HAL_CAN_GetRxMessage( hcan, fifo, &hdr, msg.data ) != HAL_OK )
+  for( uint32_t pending = *p_rfr & CAN_RF0R_FMP0; pending; --pending ) // frames waiting now, so a busy bus cannot keep this loop going
   {
-    //? The HAL refuses to read while a start or stop timeout holds it in its error state, and a frame left in the FIFO retriggers this interrupt forever.
-    if( fifo == CAN_RX_FIFO0 )
-      hcan->Instance->RF0R = CAN_RF0R_RFOM0; // release the frame; writing 0 leaves the overrun and full flags set
+    //- Wait for the output mailbox to show the next frame
+    while( *p_rfr & CAN_RF0R_RFOM0 )
+      ; // the previous release is still in progress
+
+    //- Copy the frame into the next ring slot, or count it lost
+    uint32_t head = can_dev.rx_head; // only the interrupt moves the head
+    uint32_t next = ( head + 1u ) % CAN_RX_RING_SIZE; // slot after this one
+    if( next != can_dev.rx_tail )
+    {
+      can_message_t *p_msg = &can_dev.rx_ring[head]; // free slot, the main loop reads it only after the head moves
+      uint32_t rir = p_box->RIR; // identifier and frame type
+      uint32_t data_low = p_box->RDLR; // bytes 0-3, first byte lowest
+      uint32_t data_high = p_box->RDHR; // bytes 4-7
+      if( rir & CAN_RI0R_IDE )
+      {
+        p_msg->id = rir >> CAN_RI0R_EXID_Pos; // 29-bit identifier
+        p_msg->flags = CAN_FLAG_EXTID; // extended frame
+      }
+      else
+      {
+        p_msg->id = rir >> CAN_RI0R_STID_Pos; // 11-bit identifier
+        p_msg->flags = 0; // standard frame
+      }
+      if( rir & CAN_RI0R_RTR )
+        p_msg->flags |= CAN_FLAG_RTR; // remote frame
+      p_msg->dlc = p_box->RDTR & CAN_RDT0R_DLC; // data length code as received
+      p_msg->dummy = 0; // no echo id on a received frame
+      memcpy( &p_msg->data[0], &data_low, sizeof( data_low ) ); // bytes 0-3 in one aligned word write
+      memcpy( &p_msg->data[4], &data_high, sizeof( data_high ) ); // bytes 4-7 in one aligned word write
+      p_msg->timestamp = pcan_timestamp_ticks(); // arrival time, taken in the interrupt
+      __DMB(); // finish the slot before the main loop can see the new head
+      can_dev.rx_head = next; // hand the slot to the main loop
+    }
     else
-      hcan->Instance->RF1R = CAN_RF1R_RFOM1; // release the frame; writing 0 leaves the overrun and full flags set
-    ++can_dev.rx_errs; // frame lost
-    return;
-  }
+    {
+      ++can_dev.rx_ovfs; // frames lost to a full ring
+      can_dev.isr_err |= CAN_ERROR_FLAG_RX_OVF; // reported as an RX overrun
+    }
 
-  if( hdr.IDE == CAN_ID_STD )
-  {
-    msg.id = hdr.StdId;
+    //- Release the output mailbox
+    *p_rfr = CAN_RF0R_RFOM0; // FULL and FOVR ignore a written 0, so their events stay for the HAL
+    ++can_dev.rx_msgs; // frame read from the controller
   }
-  else
-  {
-    msg.id = hdr.ExtId;
-    msg.flags |= CAN_FLAG_EXTID;
-  }
-
-  if( hdr.RTR == CAN_RTR_REMOTE )
-  {
-    msg.flags |= CAN_FLAG_RTR;
-  }
-
-  msg.dlc = hdr.DLC;
-  msg.timestamp = pcan_timestamp_ticks(); // arrival time, taken in the interrupt
-  pcan_can_rx_push( &msg ); // the main loop records it
-
-  ++can_dev.rx_msgs;
 }
 
 void pcan_can_poll(void)
@@ -557,10 +579,10 @@ void pcan_can_poll(void)
   while( can_dev.rx_tail != can_dev.rx_head )
   {
     __DMB(); // read the slot only after seeing the head that published it
-    can_message_t msg = can_dev.rx_ring[can_dev.rx_tail]; // copy before releasing the slot
-    if( can_dev.rx_cb && !can_dev.rx_cb( &msg ) )
+    //? The interrupt fills a slot only after rx_tail has moved past it, so the handler reads the frame in place.
+    if( can_dev.rx_cb && !can_dev.rx_cb( &can_dev.rx_ring[can_dev.rx_tail] ) )
       break; // USB buffer full: the frame stays queued for the next poll
-    __DMB(); // finish the copy before the interrupt may refill the slot
+    __DMB(); // finish reading the slot before the interrupt may refill it
     can_dev.rx_tail = ( can_dev.rx_tail + 1u ) % CAN_RX_RING_SIZE; // release the slot
   }
 
@@ -580,7 +602,7 @@ void pcan_can_poll(void)
 
   //- Start the mailboxes for frames queued while none was loaded
   //? Only the CAN interrupt loads the mailboxes, and with none loaded no completion interrupt comes.
-  uint8_t started = ( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_LISTENING ); // controller on the bus
+  uint8_t started = pcan_can_is_started(); // controller on the bus
   uint8_t room = ( pcan_can_rx_free() > CAN_RX_RESERVE ); // pcan_can_flush_tx() would load a frame that asks for an echo
   if( started && room && !can_dev.tx_loaded && ( can_dev.tx_head != can_dev.tx_tail ) )
     HAL_NVIC_SetPendingIRQ( CEC_CAN_IRQn ); // CEC_CAN_IRQHandler() loads the queued frames
@@ -588,15 +610,15 @@ void pcan_can_poll(void)
 
 void HAL_CAN_RxFifo0MsgPendingCallback( CAN_HandleTypeDef *hcan )
 {
-  //? Runs in the CAN interrupt, so the 3-frame hardware FIFO is emptied as soon as frames arrive.
-  for( uint32_t n = HAL_CAN_GetRxFifoFillLevel( hcan, CAN_RX_FIFO0 ); n; --n ) // frames pending now, so a failed read cannot spin
-    pcan_can_rx_frame( hcan, CAN_RX_FIFO0 ); // hand each frame to the protocol
+  UNUSED( hcan );
+  //? CEC_CAN_IRQHandler() drains FIFO 0 itself; this covers a frame that arrived before HAL_CAN_IRQHandler() ran for a rarer event.
+  pcan_can_rx_fifo_drain( CAN_RX_FIFO0 ); // hand each frame to the protocol
 }
 
 void HAL_CAN_RxFifo1MsgPendingCallback( CAN_HandleTypeDef *hcan )
 {
-  for( uint32_t n = HAL_CAN_GetRxFifoFillLevel( hcan, CAN_RX_FIFO1 ); n; --n ) // frames pending now, so a failed read cannot spin
-    pcan_can_rx_frame( hcan, CAN_RX_FIFO1 ); // hand each frame to the protocol
+  UNUSED( hcan );
+  pcan_can_rx_fifo_drain( CAN_RX_FIFO1 ); // hand each frame to the protocol
 }
 
 void HAL_CAN_TxMailbox0CompleteCallback( CAN_HandleTypeDef *hcan )
@@ -699,6 +721,29 @@ void HAL_CAN_ErrorCallback( CAN_HandleTypeDef *hcan )
 
 void CEC_CAN_IRQHandler( void )
 {
-  HAL_CAN_IRQHandler( &g_hcan ); // RX into the ring, TX completions and errors, all in interrupt context
-  pcan_can_flush_tx(); // refill the mailboxes the HAL's callbacks just retired
+  CAN_TypeDef *p_can = g_hcan.Instance; // controller registers
+  uint32_t tsr = p_can->TSR; // completion flags of every mailbox
+
+  //- Retire the mailboxes whose frame was acknowledged
+  //? Mailbox n keeps RQCP and TXOK at the mailbox 0 positions shifted by 8 * n bits.
+#pragma GCC unroll 3 // straight-line code for the mailboxes
+  for( uint32_t mb = 0; mb < CAN_TX_MAILBOXES; ++mb )
+  {
+    uint32_t shift = 8u * mb; // this mailbox's status bits
+    if( ( ( tsr >> shift ) & ( CAN_TSR_RQCP0 | CAN_TSR_TXOK0 ) ) != ( CAN_TSR_RQCP0 | CAN_TSR_TXOK0 ) )
+      continue; // pending, or ended without an acknowledge, which HAL_CAN_IRQHandler() reports below
+    p_can->TSR = CAN_TSR_RQCP0 << shift; // clear RQCP with TXOK, ALST and TERR of this mailbox only
+    pcan_can_tx_done( mb, 1 ); // frame acknowledged
+  }
+
+  //- Move the received frames into the ring
+  pcan_can_rx_fifo_drain( CAN_RX_FIFO0 ); // the filter routes every frame to FIFO 0
+
+  //- Leave the rare events to the HAL
+  //? Aborts, failed attempts, FIFO overruns, FIFO 1 and error interrupts are rare, while the HAL's handler costs more than both paths above for every frame.
+  if( ( p_can->TSR & ( CAN_TSR_RQCP0 | CAN_TSR_RQCP1 | CAN_TSR_RQCP2 ) ) || ( p_can->RF0R & CAN_RF0R_FOVR0 ) || ( p_can->RF1R & ( CAN_RF1R_FMP1 | CAN_RF1R_FOVR1 ) ) || ( p_can->MSR & CAN_MSR_ERRI ) )
+    HAL_CAN_IRQHandler( &g_hcan ); // aborts, failed attempts, overruns, FIFO 1 and errors through the HAL callbacks
+
+  //- Refill the mailboxes the completions freed
+  pcan_can_flush_tx(); // load queued frames into free mailboxes
 }

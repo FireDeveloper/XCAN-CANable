@@ -78,6 +78,7 @@ uint32_t pcan_can_tx_free( void );
 /**
  * @brief Install the handler pcan_can_poll() passes each received frame and echo to.
  * @param[in] cb Handler; returns non-zero once it took the frame, zero to keep the frame queued for the next poll.
+ * @note The frame is read in place in the RX ring and stays valid only until @p cb returns.
  */
 void pcan_can_install_rx_callback( int (*cb)( const can_message_t * ) );
 

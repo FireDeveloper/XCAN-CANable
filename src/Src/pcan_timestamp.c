@@ -31,9 +31,3 @@ uint16_t pcan_timestamp_millis( void )
 {
   return (HAL_GetTick()&0xFFFF);
 }
-
-uint16_t pcan_timestamp_ticks( void )
-{
-  /* 1 tick => 42.666 us */
-  return TIM3->CNT;
-}
