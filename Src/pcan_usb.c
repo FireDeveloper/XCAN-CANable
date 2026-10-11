@@ -124,12 +124,26 @@ static void pcan_usb_msgout_arm( USBD_HandleTypeDef *pdev )
   USBD_LL_PrepareReceive( pdev, PCAN_USB_EP_MSGOUT, pcan_data.buffer_data, sizeof( pcan_data.buffer_data ) ); // receive into the data buffer
 }
 
+/**
+ * @brief Open the class endpoints when the host selects the configuration.
+ * @param[in,out] pdev   USB device handle.
+ * @param[in]     cfgidx Configuration index, unused.
+ * @return USBD_OK.
+ * @note Clears the IN-transfer bookkeeping, so a transfer cut short by a USB reset cannot block later ones.
+ */
 static uint8_t device_init( USBD_HandleTypeDef *pdev, uint8_t cfgidx )
 {
   USB_ENDPOINT_DESCRIPTOR *p_ep = &pcan_usb_dev.ep1;
 
   UNUSED( cfgidx );
-  
+
+  //- Forget IN transfers a USB reset cut short
+  //? Only DataIn clears these, and a reset drops the transfer without one, which would block the endpoint until power-off.
+  memset( pcan_data.ep_tx_in_use, 0, sizeof( pcan_data.ep_tx_in_use ) ); // no IN transfer in flight
+  memset( pcan_data.ep_tx_data_pending, 0, sizeof( pcan_data.ep_tx_data_pending ) ); // no flush waiting
+  pdev->ep_in[PCAN_USB_EP_CMDIN & EP_ADDR_MSK].total_length = 0; // command reply endpoint idle
+  pdev->ep_in[PCAN_USB_EP_MSGIN & EP_ADDR_MSK].total_length = 0; // data endpoint idle
+
   for( int i = 0; i < pcan_usb_dev.if0.bNumEndpoints; i++ )
   {
     uint8_t ep_addr = p_ep[i].bEndpointAddress;
@@ -144,9 +158,7 @@ static uint8_t device_init( USBD_HandleTypeDef *pdev, uint8_t cfgidx )
         assert( 0 );
     }
     
-    USBD_LL_OpenEP( pdev, ep_addr,
-                          p_ep[i].bmAttributes,
-                          p_ep[i].wMaxPacketSize );
+    USBD_LL_OpenEP( pdev, ep_addr, p_ep[i].bmAttributes, p_ep[i].wMaxPacketSize );
     
     if( ( ep_addr & 0x80 ) != 0 )
       pdev->ep_in[ep_addr & EP_ADDR_MSK].is_used = 1;
@@ -223,33 +235,34 @@ void pcan_usb_poll( void )
     pcan_usb_msgout_arm( &hUsbDeviceFS ); // re-arms, or stays paused
 }
 
+/**
+ * @brief Answer the control requests the USB core forwards to the class.
+ * @param[in,out] pdev USB device handle.
+ * @param[in]     req  Setup packet.
+ * @return USBD_OK when the request is answered, USBD_FAIL when it is stalled.
+ * @note Only the vendor request 0 with wValue 0 (bootloader info) is answered; it also resets the IN endpoints' bookkeeping.
+ */
 static uint8_t  device_setup( USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req )
 {
-  switch( req->bRequest )
+  static const uint8_t bootloader_info[] = { 0x00, 0x00, 0x08, 0x04, 0x00, 0x08, 0x07, 0x00, 0x04, 0x02, 0xe0, 0x07, 0x01, 0x00, 0x00, 0x00 }; // info reply
+
+  //- Stall anything but the vendor bootloader info request
+  //? The core forwards standard interface requests here too, and a standard Get Status request must not receive this block.
+  if( ( ( req->bmRequest & USB_REQ_TYPE_MASK ) != USB_REQ_TYPE_VENDOR ) || ( req->bRequest != 0 ) || ( req->wValue != 0 ) )
   {
-    /* get info */
-    case 0:
-      switch( req->wValue )
-      {
-        case 0: /* bootloader info */
-        {
-          static const uint8_t bootloader_info[] = { 
-                                  0x00, 0x00, 0x08, 0x04, 0x00, 0x08, 0x07, 0x00,
-                                  0x04, 0x02, 0xe0, 0x07, 0x01, 0x00, 0x00, 0x00
-                                };
-          USBD_CtlSendData( pdev, (void*)bootloader_info, sizeof( bootloader_info ) );
-
-          pcan_led_set_mode( LED_CH0_RX, LED_MODE_ON, 0 );
-          pcan_led_set_mode( LED_CH0_TX, LED_MODE_ON, 0 );
-
-          /* reset endpoints */
-          pcan_flush_ep( PCAN_USB_EP_MSGIN );
-          pcan_flush_ep( PCAN_USB_EP_CMDIN );
-        }
-        break;
-      }
-    break;  
+    USBD_CtlError( pdev, req ); // stall EP0 for an unknown request
+    return USBD_FAIL; // the core sends no status stage
   }
+
+  //- Send the bootloader info, no longer than the host asked for
+  USBD_CtlSendData( pdev, (void*)bootloader_info, MIN( req->wLength, sizeof( bootloader_info ) ) ); // data stage
+
+  pcan_led_set_mode( LED_CH0_RX, LED_MODE_ON, 0 );
+  pcan_led_set_mode( LED_CH0_TX, LED_MODE_ON, 0 );
+
+  /* reset endpoints */
+  pcan_flush_ep( PCAN_USB_EP_MSGIN );
+  pcan_flush_ep( PCAN_USB_EP_CMDIN );
   return USBD_OK;
 }
 
@@ -413,7 +426,13 @@ int pcan_flush_ep( uint8_t ep )
   USBD_HandleTypeDef *pdev = &hUsbDeviceFS;
   struct t_class_data *p_data = (void*)pdev->pClassData;
 
+  //- Endpoints exist only once the device is configured
+  if( !p_data )
+    return 0; // nothing to reset before the host picks a configuration
+
+  //- Forget the transfer the host abandoned
   p_data->ep_tx_in_use[ep&0x0F] = 0;
+  pdev->ep_in[ep & EP_ADDR_MSK].total_length = 0; // pcan_usb_send_command_buffer() reads this as busy
   return USBD_LL_FlushEP( pdev, ep ) == USBD_OK;
 }
 

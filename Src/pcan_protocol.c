@@ -441,6 +441,12 @@ static void pcan_rx_message( can_message_t *msg )
   pcan_rx_can_frame( &pcan_records, msg );
 }
 
+/**
+ * @brief Latch CAN controller error events for the next error record.
+ * @param[in] err    CAN_ERROR_FLAG_* events from the controller.
+ * @param[in] rx_err Receive error counter.
+ * @param[in] tx_err Transmit error counter.
+ */
 static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
 {
   pcan_device.can.rx_err = rx_err;
@@ -448,7 +454,12 @@ static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
 
   if( err & CAN_ERROR_FLAG_BUSOFF )
   {
-    pcan_device.can.err |= PCAN_USB_ERROR_BUS_OFF; 
+    pcan_device.can.err |= PCAN_USB_ERROR_BUS_OFF;
+  }
+
+  if( err & CAN_ERROR_FLAG_RX_OVF )
+  {
+    pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR; // the controller's RX FIFO dropped frames
   }
 }
 
@@ -710,9 +721,10 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
         break;
         /* set CAN on/off*/
         case PCAN_USB_CMD_BUS:
-          pcan_device.bus_active = cmd->param[0];
+          //? A failed start leaves the controller off the bus, so the channel counts as on only once the controller joined.
+          pcan_device.bus_active = ( pcan_can_set_bus_active( cmd->param[0] ) == 0 ) && cmd->param[0]; // on only when the controller joined
+          pcan_device.can.err = 0x00; // a new session starts without latched errors
           pcan_led_set_mode( LED_STAT, pcan_device.bus_active ? LED_MODE_BLINK_SLOW:LED_MODE_OFF, 0 );
-          pcan_can_set_bus_active( pcan_device.bus_active );
 
           if( pcan_device.bus_active )
           {

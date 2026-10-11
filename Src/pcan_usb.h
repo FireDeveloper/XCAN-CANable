@@ -24,6 +24,11 @@ struct t_m2h_fsm
   uint32_t  total_tx;
 };
 
+/**
+ * @brief Forget an IN endpoint's pending transfer so new data can be queued on it.
+ * @param[in] ep IN endpoint address, e.g. PCAN_USB_EP_MSGIN.
+ * @return 1 when the endpoint was reset, 0 before the device is configured or when the HAL refuses.
+ */
 int pcan_flush_ep( uint8_t ep );
 int pcan_flush_data( struct t_m2h_fsm *pfsm, void *src, int size );
 

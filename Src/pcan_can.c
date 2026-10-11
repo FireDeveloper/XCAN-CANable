@@ -9,6 +9,7 @@
 static CAN_HandleTypeDef g_hcan = { .Instance = CAN };
 #define INTERNAL_CAN_IT_FLAGS          (  CAN_IT_TX_MAILBOX_EMPTY |\
                                           CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING |\
+                                          CAN_IT_RX_FIFO0_OVERRUN | CAN_IT_RX_FIFO1_OVERRUN |\
                                           CAN_IT_BUSOFF |\
                                           CAN_IT_ERROR_WARNING |\
                                           CAN_IT_ERROR_PASSIVE |\
@@ -55,7 +56,8 @@ void pcan_can_init(void)
   g_hcan.Init.TimeSeg1 = CAN_BS1_1TQ;
   g_hcan.Init.TimeSeg2 = CAN_BS2_1TQ;
   g_hcan.Init.TimeTriggeredMode = DISABLE;
-  g_hcan.Init.AutoBusOff = ENABLE;
+  //? PCAN hosts restart a bus-off channel themselves; Linux cannot restart one that already recovered, which blocks its TX queue.
+  g_hcan.Init.AutoBusOff = DISABLE; // stay bus-off until the host restarts the channel
   g_hcan.Init.AutoWakeUp = DISABLE;
   g_hcan.Init.AutoRetransmission = ENABLE;
   g_hcan.Init.ReceiveFifoLocked = DISABLE;
@@ -82,6 +84,25 @@ void pcan_can_init(void)
   {
     assert( 0 );
   }
+}
+
+/**
+ * @brief Apply g_hcan.Init to the controller and put it back on the bus when it was started.
+ * @note A controller that fails to enter init mode or to resync stays off the bus until the next bus-on command.
+ */
+static void pcan_can_reinit( void )
+{
+  //- Remember whether the controller was on the bus
+  uint8_t was_started = ( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_LISTENING ); // HAL_CAN_Init leaves it in init mode
+
+  //- Reconfigure in init mode
+  HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // a queued frame must not go out with the old settings
+  if( HAL_CAN_Init( &g_hcan ) != HAL_OK )
+    return; // controller never entered init mode
+
+  //- Rejoin the bus when it was on
+  if( was_started && ( HAL_CAN_Start( &g_hcan ) != HAL_OK ) )
+    HAL_CAN_Init( &g_hcan ); // leave the error state the start timeout left
 }
 
 void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t sjw )
@@ -117,10 +138,7 @@ void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t s
   g_hcan.Init.TimeSeg1 = tseg1_table[tseg1 - 1];
   g_hcan.Init.TimeSeg2 = tseg2_table[tseg2 - 1];
 
-  if( HAL_CAN_Init( &g_hcan ) != HAL_OK )
-  {
-    assert( 0 );
-  }
+  pcan_can_reinit(); // apply the timing, back on the bus when it was on
 }
 
 void pcan_can_install_rx_callback( void (*cb)( can_message_t * ) )
@@ -216,19 +234,13 @@ uint32_t pcan_can_tx_free( void )
 void pcan_can_set_silent( uint8_t silent_mode )
 {
   g_hcan.Init.Mode = silent_mode ? CAN_MODE_SILENT: CAN_MODE_NORMAL;
-  if( HAL_CAN_Init( &g_hcan ) != HAL_OK )
-  {
-    assert( 0 );
-  }
+  pcan_can_reinit(); // apply the mode, back on the bus when it was on
 }
 
 void pcan_can_set_loopback( uint8_t loopback )
 {
   g_hcan.Init.Mode = loopback ? CAN_MODE_LOOPBACK: CAN_MODE_NORMAL;
-  if( HAL_CAN_Init( &g_hcan ) != HAL_OK )
-  {
-    assert( 0 );
-  }
+  pcan_can_reinit(); // apply the mode, back on the bus when it was on
 }
 
 /**
@@ -240,26 +252,25 @@ static void pcan_can_tx_fifo_clear( void )
   can_dev.tx_tail = 0; // read index follows the write index
 }
 
-void pcan_can_set_bus_active( uint16_t mode )
+int pcan_can_set_bus_active( uint16_t mode )
 {
-  if( mode )
-  {
-    //- Drop what an earlier session left queued
-    pcan_can_tx_fifo_clear(); // forget queued frames
-    HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // empty the mailboxes before joining
-
-    //- Join the bus
-    if( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_ERROR )
-      HAL_CAN_Init( &g_hcan ); // leave the error state a failed start or stop left behind
-    HAL_CAN_Start( &g_hcan ); // leave init mode
-  }
-  else
-  {
-    //- Leave the bus and drop pending frames
-    HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // cancel pending mailbox requests
+  //- Leave the bus and drop pending frames, also before a restart
+  HAL_CAN_AbortTxRequest( &g_hcan, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2 ); // cancel pending mailbox requests
+  if( HAL_CAN_GetState( &g_hcan ) == HAL_CAN_STATE_LISTENING )
     HAL_CAN_Stop( &g_hcan ); // enter init mode once the frame on the wire ends
-    pcan_can_tx_fifo_clear(); // nothing queued outlives the session
+  if( HAL_CAN_GetState( &g_hcan ) != HAL_CAN_STATE_READY )
+    HAL_CAN_Init( &g_hcan ); // leave the error state a failed start or stop left behind
+  pcan_can_tx_fifo_clear(); // nothing queued outlives the session
+  if( !mode )
+    return 0; // bus off requested
+
+  //- Join the bus; leaving init mode also starts the bus-off recovery sequence
+  if( HAL_CAN_Start( &g_hcan ) != HAL_OK )
+  {
+    HAL_CAN_Init( &g_hcan ); // leave the error state the start timeout left
+    return -1; // controller never saw an idle bus
   }
+  return 0; // on the bus
 }
 
 void pcan_can_get_bus_status( can_bus_status_t *p_status )
@@ -337,12 +348,15 @@ void pcan_can_poll(void)
 
 void HAL_CAN_RxFifo0MsgPendingCallback( CAN_HandleTypeDef *hcan )
 {
-  pcan_can_rx_frame( hcan, CAN_RX_FIFO0 );
+  //? The hardware FIFO holds 3 frames and is polled once per main-loop pass, so reading one frame per pass overruns it under load.
+  for( uint32_t n = HAL_CAN_GetRxFifoFillLevel( hcan, CAN_RX_FIFO0 ); n; --n ) // frames pending now, so a failed read cannot spin
+    pcan_can_rx_frame( hcan, CAN_RX_FIFO0 ); // hand each frame to the protocol
 }
 
 void HAL_CAN_RxFifo1MsgPendingCallback( CAN_HandleTypeDef *hcan )
 {
-  pcan_can_rx_frame( hcan, CAN_RX_FIFO1 );
+  for( uint32_t n = HAL_CAN_GetRxFifoFillLevel( hcan, CAN_RX_FIFO1 ); n; --n ) // frames pending now, so a failed read cannot spin
+    pcan_can_rx_frame( hcan, CAN_RX_FIFO1 ); // hand each frame to the protocol
 }
 
 void HAL_CAN_TxMailbox0CompleteCallback( CAN_HandleTypeDef *hcan )
