@@ -93,3 +93,9 @@ PCAN_USB_PARAM;
 #define PCAN_USB_REC_BUSLOAD   3
 #define PCAN_USB_REC_TS        4
 #define PCAN_USB_REC_BUSEVT    5
+
+#define PCAN_USB_ERR_RXERR     0x02 // PCAN_USB_CMD_ERR_FR mask: send the receive error counter
+#define PCAN_USB_ERR_TXERR     0x04 // PCAN_USB_CMD_ERR_FR mask: send the transmit error counter
+
+#define PCAN_USB_ERR_CNT_DEC   0x00 // PCAN_USB_REC_BUSEVT number: error counters decreasing
+#define PCAN_USB_ERR_CNT_INC   0x80 // PCAN_USB_REC_BUSEVT number: error counters increasing

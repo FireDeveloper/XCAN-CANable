@@ -25,6 +25,7 @@ static struct
     uint8_t   ecc;
     uint8_t   rx_err;
     uint8_t   tx_err;
+    uint8_t   bus_state; // CAN_BUS_STATE_* last reported to the host
     /* config */
     uint8_t   btr0;
     uint8_t   btr1;
@@ -266,14 +267,19 @@ uint16_t pcan_record_buffer_flush( PCAN_RECORD_BUFFER_EX *prec )
   return 0;
 }
 
-#if 0
-static void pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
+/**
+ * @brief Append a bus event record carrying the CAN error counters.
+ * @param[in,out] prec  Record buffer the record is appended to.
+ * @param[in]     flags PCAN_USB_ERR_CNT_INC when the bus state worsened, PCAN_USB_ERR_CNT_DEC when it recovered.
+ * @return 1 when the record is appended, 0 when @p prec has no room for it.
+ */
+static uint8_t pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
 {
   uint8_t *ptr, sl, pos = 0;
 
   ptr = pcan_record_buffer_request( prec, 6 );
   if( !ptr )
-    return;
+    return 0; // no room for the record
 
   /* sl */
   sl = PCAN_USB_STATUSLEN_INTERNAL | 0x03;
@@ -304,12 +310,12 @@ static void pcan_bus_event( PCAN_RECORD_BUFFER_EX *prec, uint8_t flags )
   /* tx error counter */
   pack_u8( ptr, pcan_device.can.tx_err );
   ptr += 1;
-  pos += 1;  
+  pos += 1;
 
   /* add new record */
-  pcan_record_buffer_commit( prec, pos );  
+  pcan_record_buffer_commit( prec, pos );
+  return 1; // record appended
 }
-#endif
 
 #define BUFFER_MINIMAL_GAP_SIZE (16u)
 static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t *msg )
@@ -557,6 +563,42 @@ static void pcan_set_bitrate( uint8_t *ptr )
   pcan_can_set_bitrate( brp, tseg1, tseg2, sjw );
 }
 
+/**
+ * @brief Append an error record: the latched error events plus the bus state last reported to the host.
+ * @param[in,out] prec Record buffer the record is appended to.
+ * @return 1 when the record is appended, 0 when @p prec has no room for it.
+ * @note The latched events in pcan_device.can.err are cleared only once the record is appended.
+ */
+static uint8_t pcan_error_event( PCAN_RECORD_BUFFER_EX *prec )
+{
+  uint8_t *ptr, n;
+
+  //- Reserve room for the record
+  ptr = pcan_record_buffer_request( prec, 3 ); // status, function and number bytes
+  if( !ptr )
+    return 0; // no room, the latched events wait for the next record
+
+  //- Merge the bus state into the latched events
+  //? PCAN-USB has no error-passive bit: PCAN_USB_ERROR_BUS_HEAVY covers both warning and passive.
+  //? The host tells them apart by the error counters pcan_bus_event() sends.
+  n = pcan_device.can.err; // events latched since the last record
+  if( pcan_device.can.bus_state == CAN_BUS_STATE_OFF )
+  {
+    n |= PCAN_USB_ERROR_BUS_OFF; // controller is bus-off
+  }
+  else if( pcan_device.can.bus_state != CAN_BUS_STATE_ACTIVE )
+  {
+    n |= PCAN_USB_ERROR_BUS_HEAVY; // an error counter is at or above 96
+  }
+
+  //- Pack and commit the record
+  pack_u8( &ptr[0], PCAN_USB_STATUSLEN_INTERNAL ); // internal record, no data bytes
+  pack_u8( &ptr[1], PCAN_USB_REC_ERROR ); // function: error status
+  pack_u8( &ptr[2], n ); // number: PCAN_USB_ERROR_* bits
+  pcan_record_buffer_commit( prec, 3 ); // publish the record
+  pcan_device.can.err = 0x00; // latched events are reported
+  return 1; // record appended
+}
 
 /* create */
 void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
@@ -592,31 +634,38 @@ void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
   /* add new record */
   pcan_record_buffer_commit( prec, pos );
 
-  /* error record */
-  pos = 0;
-  ptr = pcan_record_buffer_request( prec, 3 );
-  if( !ptr )
-    return;
+  pcan_error_event( prec ); // repeat the error status with every timesync
+}
 
-  pcan_device.can.err &= pcan_device.can.err_mask;
+/**
+ * @brief Report a change of the CAN bus state to the host.
+ * @param[in,out] prec Record buffer the records are appended to.
+ * @note A bus event record that finds @p prec full is retried on the next call; a lost error record is repeated by the next pcan_timesync_event().
+ */
+static void pcan_bus_state_poll( PCAN_RECORD_BUFFER_EX *prec )
+{
+  can_bus_status_t status;
+  uint8_t flags;
 
-  pack_u8( ptr, PCAN_USB_STATUSLEN_INTERNAL );
-  ptr += 1;
-  pos += 1;
+  //- Sample the controller state and error counters
+  pcan_can_get_bus_status( &status ); // read the CAN error status register
+  pcan_device.can.rx_err = status.rx_err; // receive error counter for pcan_bus_event()
+  pcan_device.can.tx_err = status.tx_err; // transmit error counter for pcan_bus_event()
+  if( status.state == pcan_device.can.bus_state )
+    return; // state unchanged, nothing to report
 
-  pack_u8( ptr, PCAN_USB_REC_ERROR ); /* f */
-  ptr += 1;
-  pos += 1;
+  //- Send the error counters when the host asked for them
+  //? The host reads the counters while it decodes the error record, so the bus event record has to come first.
+  if( pcan_device.can.err_mask & ( PCAN_USB_ERR_RXERR | PCAN_USB_ERR_TXERR ) )
+  {
+    flags = ( status.state > pcan_device.can.bus_state ) ? PCAN_USB_ERR_CNT_INC : PCAN_USB_ERR_CNT_DEC; // a worse state means the counters rose
+    if( !pcan_bus_event( prec, flags ) )
+      return; // no room, retry on the next poll
+  }
 
-  pack_u8( ptr, pcan_device.can.err ); /* n */ 
-  ptr += 1;
-  pos += 1;
-
-  /* add new record */
-  pcan_record_buffer_commit( prec, pos );
-
-  /* clean errors */
-  pcan_device.can.err = 0x00;
+  //- Report the new state now instead of at the next timesync
+  pcan_device.can.bus_state = status.state; // state the host is told about
+  pcan_error_event( prec ); // send the new state
 }
 
 void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
@@ -663,6 +712,7 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
 
           if( pcan_device.bus_active )
           {
+            pcan_device.can.bus_state = CAN_BUS_STATE_ACTIVE; // host starts the channel error active
             /* provide first timesync event */
             pcan_device.last_timestamp_sync = pcan_timestamp_ticks();
             pcan_timesync_event( &pcan_records );
@@ -688,7 +738,8 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
         break;
         /* error frame mask */
         case PCAN_USB_CMD_ERR_FR:
-          pcan_device.can.err_mask = cmd->param[0];
+          //? The mask asks for bus event records (see pcan_bus_state_poll()); it never filters the error record.
+          pcan_device.can.err_mask = cmd->param[0]; // PCAN_USB_ERR_* bits the host wants
         break;
         /* set led mode */
         case PCAN_USB_CMD_LED:
@@ -816,6 +867,7 @@ void pcan_protocol_poll( void )
 
   if( pcan_device.bus_active  )
   {
+    pcan_bus_state_poll( &pcan_records ); // report bus state changes ahead of the periodic error record
     /* each ~1000 ms */
     if( ( ((uint16_t)( ts_ms - pcan_device.last_timestamp_sync )) >= PCAN_TICKS_FROM_US( 1000000u ) ) )
     {

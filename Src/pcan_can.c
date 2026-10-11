@@ -229,6 +229,39 @@ void pcan_can_set_bus_active( uint16_t mode )
   }
 }
 
+void pcan_can_get_bus_status( can_bus_status_t *p_status )
+{
+  //- Input validation
+  assert( p_status ); // reject a null status
+
+  //- Read flags and counters in one access
+  uint32_t esr = g_hcan.Instance->ESR; // snapshot the error status register
+
+  //- Extract the error counters
+  p_status->rx_err = ( esr & CAN_ESR_REC ) >> CAN_ESR_REC_Pos; // receive error counter
+  p_status->tx_err = ( esr & CAN_ESR_TEC ) >> CAN_ESR_TEC_Pos; // transmit error counter, low byte
+
+  //- Map the error flags to a bus state, most severe first
+  if( esr & CAN_ESR_BOFF )
+  {
+    //? ESR.TEC is the low byte of a 9-bit counter, so it wraps once the counter passes 255 and the controller goes bus-off.
+    p_status->tx_err = 0xFF; // saturate the wrapped counter
+    p_status->state = CAN_BUS_STATE_OFF; // controller is bus-off
+  }
+  else if( esr & CAN_ESR_EPVF )
+  {
+    p_status->state = CAN_BUS_STATE_PASSIVE; // controller is error passive
+  }
+  else if( esr & CAN_ESR_EWGF )
+  {
+    p_status->state = CAN_BUS_STATE_WARNING; // error warning limit reached
+  }
+  else
+  {
+    p_status->state = CAN_BUS_STATE_ACTIVE; // controller is error active
+  }
+}
+
 static void pcan_can_rx_frame( CAN_HandleTypeDef *hcan, uint32_t fifo )
 {
   CAN_RxHeaderTypeDef hdr = { 0 };
@@ -336,7 +369,10 @@ void HAL_CAN_ErrorCallback( CAN_HandleTypeDef *hcan )
 
   if( can_dev.can_err_cb && can_err )
   {
-    can_dev.can_err_cb( can_err, can_dev.tx_errs & 0xFF, can_dev.rx_errs );
+    can_bus_status_t status;
+
+    pcan_can_get_bus_status( &status ); // read the controller's REC and TEC
+    can_dev.can_err_cb( can_err, status.rx_err, status.tx_err ); // report the events with the hardware counters
   }
   
   HAL_CAN_ResetError( hcan );
