@@ -20,7 +20,7 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 
 ## Hardware
 
-<img src="docs/dykbradio_canable_v1.0.png" alt="DykbRadio CANable V1.0" width="480">
+<img src="docs/dykbradio_canable_v1.0.png" alt="DykbRadio CANable V1.0, Pro and Nano variants, top side" width="400"> <img src="docs/dykbradio_canable_v1.0_bottom.png" alt="DykbRadio CANable V1.0, Pro and Nano variants, bottom side with the CAN terminal labels and the through-hole SWD header" width="400">
 
 | Item | Value |
 |---|---|
@@ -41,7 +41,9 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 
 ### SWD header
 
-<img src="docs/swd_pinout.svg" alt="SWD header pinout, top view: pin 1 Vcc (square pad), pin 2 SWDIO, pin 3 SWCLK, pin 4 GND" width="560">
+The SWD header is a row of through-hole pads, reachable from either side of the board. Turning the board over mirrors the pin order, so go by the square pad, which is pin 1.
+
+<img src="docs/swd_pinout.svg" alt="SWD header pinout: pin 1 Vcc (square pad), pin 2 SWDIO, pin 3 SWCLK, pin 4 GND" width="560">
 
 | Pin | Pad | Signal |
 |---|---|---|
@@ -52,21 +54,41 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 
 ## Performance
 
-Measured on the board at 1 Mbit/s (BTR0/BTR1 00h/14h) with the Windows CAN Driver, against a second adapter on the same bus, 20,000 frames per run, echo enabled on the board. Rates are frames per second over the whole run.
+Measured between two of these boards on one bus with the Windows CAN Driver, echo frames enabled on both channels, at the standard bit timings 00h/14h, 00h/1Ch, 01h/1Ch and 03h/1Ch (BTR0/BTR1). Each run is about two seconds of back-to-back traffic per sender, at least 2,000 frames, and every received frame and every echo is checked against what was sent: identifier, length, data and order.
 
-| Test | Frames | Rate | Result |
-|---|---|---|---|
-| Board sends | 8 data bytes, 11-bit ID | 8,490/s | All delivered in order, 20,000 echoes in order |
-| Board sends | no data, 11-bit ID | 17,650/s | All delivered, 20,000 echoes |
-| Board sends | no data, 29-bit ID | 14,170/s | All delivered in order, 20,000 echoes in order |
-| Board receives | 8 data bytes, 11-bit ID | 8,000/s, the sender's limit | None lost |
-| Board receives | no data, 11-bit ID | 17,700/s | None lost |
-| Board receives | no data, 29-bit ID | 12,250/s, the sender's limit | None lost |
-| Both directions at once | no data, 11-bit ID | bus shared | All 20,000 received and 20,000 echoes, no overrun |
+Load is the share of bus time the frames used, from each frame's exact length on the wire (stuff bits, CRC, acknowledge, end of frame and interframe space), so 100% means back to back with no idle bit. An 11-bit frame takes 111 to 135 bit times with 8 data bytes and 47 to 55 without, depending on its stuff bits. Loads assume the nominal bit rate, so the clock tolerance between the boards and the PC can show a full bus as 100.1%.
 
-An 8-byte frame with an 11-bit ID takes at least 111 bit times including the interframe space, before stuff bits, so 1 Mbit/s carries at most about 9,000 of them per second; the 8,490/s above is that limit once the stuff bits of the test data are counted.
+About 750,000 frames crossed the bus over these runs: none was lost, duplicated, reordered or corrupted, both channels stayed error active, and neither board reported an overrun.
 
-When the host floods the bus, the board sends back to back. Nodes whose frames have lower priority then get the bus only once the board's queue runs empty, which is ordinary CAN arbitration.
+### One sender
+
+Frames per second and bus load from one board to the other, with the firmware as the STM32Cube extension builds it (ST's GCC 14.3.1).
+
+| Frames | 1 Mbit/s | 500 kbit/s | 250 kbit/s | 125 kbit/s |
+|---|---|---|---|---|
+| 11-bit ID, 8 data bytes | 8,492/s, 100% | 4,246/s, 100.1% | 2,118/s, 100% | 1,057/s, 100.1% |
+| 29-bit ID, 8 data bytes | 7,208/s, 100% | 3,603/s, 100.1% | 1,798/s, 100% | 898/s, 100.1% |
+| 29-bit ID, no data | 14,205/s, 99.9% | 7,080/s, 100% | 3,524/s, 100% | 1,762/s, 100.1% |
+| 11-bit ID, no data | 20,311/s, 99.8% | 10,164/s, 99.9% | 5,090/s, 100.1% | 2,545/s, 100.1% |
+
+Every cell is a full bus, including the shortest frames with an echo for each: an 11-bit frame without data spends 49 µs on the wire, and the board handles it and its echo in less. When echoes back up because USB is busy, the board pauses sending rather than dropping them, so nothing is lost, and the receiving board keeps up with a full bus.
+
+The bus never idles at 1 Mbit/s; the last 0.1-0.2% goes to CAN's own bit timing. The receivers drive each frame's acknowledge bit, their edge reaches the sender a round trip late, and resynchronization stretches that bit by one time quantum, 125 ns at 00h/14h, so every frame runs about 0.1 bit time long whether echo is on or off. With 01h/01h, which has 250 ns quanta at the same bit rate and sample point, the delay stays inside one quantum and the same frames fill 100% of the bus.
+
+### Both boards sending
+
+Frames per second and load of the whole bus, with both boards sending at once, measured with v1.0.0 on both boards.
+
+| Frames | 1 Mbit/s | 500 kbit/s | 250 kbit/s | 125 kbit/s |
+|---|---|---|---|---|
+| 11-bit ID, 8 data bytes | 8,489/s, 99.9% | 4,243/s, 100% | 2,118/s, 100% | 1,057/s, 100.1% |
+| 29-bit ID, 8 data bytes | 7,232/s, 99.9% | 3,614/s, 100% | 1,804/s, 100% | 901/s, 100.1% |
+| 29-bit ID, no data | 14,207/s, 99.9% | 7,080/s, 100% | 3,524/s, 100% | 1,763/s, 100.1% |
+| 11-bit ID, no data | 20,395/s, 99.9% | 10,204/s, 99.9% | 5,108/s, 100% | 2,556/s, 100.1% |
+
+Each board sends back to back, so the one whose frames have the lower identifiers wins arbitration until its queue runs empty, and the other takes the remaining bus time, which is ordinary CAN arbitration.
+
+### Error frame rates
 
 | Error frames | Rate | Decoded as |
 |---|---|---|
@@ -77,12 +99,12 @@ When the host floods the bus, the board sends back to back. Nodes whose frames h
 
 | Resource | Size |
 |---|---|
-| Flash | 16,888 bytes of 65,536 (26%) |
-| RAM, static | 10,872 bytes of 16,384 |
+| Flash | 17,032 bytes of 65,536 (26%) |
+| RAM, static | 10,880 bytes of 16,384 |
 | Stack reserve | 2,048 bytes |
 | Transmit queue | 128 frames |
 | Receive buffer | 128 frames or echoes |
-| USB record buffer | 896 bytes, 14 USB packets |
+| USB record buffers | 2 × 896 bytes, 14 USB packets each: one fills while USB sends the other |
 
 ## CAN behavior
 
@@ -149,14 +171,14 @@ The serial number is the XOR of the 32-bit words of the STM32's 96-bit unique ID
 
 ### Data path
 
-- The CAN interrupt does the time-critical work: it empties the controller's 3-frame receive FIFO into a 128-entry ring and stamps each frame, retires finished transmit mailboxes in the order they were loaded, queues their echoes, and refills free mailboxes from the 128-frame transmit queue.
-- The main loop polls USB, packs received frames, echoes and status into 64-byte USB packets, and decodes the host's frames into the transmit queue.
+- The CAN interrupt does the time-critical work straight from the controller's registers: it empties the 3-frame receive FIFO into a 128-entry ring and stamps each frame, retires finished transmit mailboxes in the order they were loaded, queues their echoes, and refills free mailboxes from the 128-frame transmit queue. The HAL's interrupt handler runs only for aborts, failed attempts, FIFO overruns and errors.
+- The main loop polls USB, packs received frames, echoes and status back to back into 64-byte USB packets, and decodes the host's frames into the transmit queue. It reads each frame in place in the ring and updates the LEDs once per pass.
 - The controller sends its mailboxes in load order (transmit FIFO priority), so the host's order holds with several mailboxes in flight.
 
 ### Flow control
 
 - The USB data endpoint pauses while the transmit queue has fewer than 20 free slots, the most frames one USB packet can carry, so the host's own queue fills instead of frames being dropped.
-- When USB is still busy with the previous transfer, received frames stay in the ring until there is room.
+- USB sends one record buffer straight from memory while records fill the other, so a transfer needs no copy. Received frames stay in the ring only when the filling buffer is full and USB is still busy.
 - Echoes travel through the same ring, so a frame that asks for an echo waits while the ring is half full; the other half stays free for frames from other nodes.
 
 ### Source files
@@ -171,28 +193,27 @@ The serial number is the XOR of the 32-bit words of the STM32's 96-bit unique ID
 | `src/Src/pcan_timestamp.c` | 42.67 µs timer and millisecond time |
 | `src/Src/pcan_varian.h` | Board pins |
 | `src/Src/usbd_desc.c` | USB device descriptor and strings |
-| `src/Makefile` | Build: sources, compiler flags, output in `src/build/` |
+| `src/CMakeLists.txt` | Build: sources, compiler flags, output in `src/build/<preset>/` |
+| `src/CMakePresets.json` | `Release` and `Debug` build configurations, Ninja |
+| `src/gcc-arm-none-eabi.cmake` | Toolchain: the GNU Arm compiler found on the PATH |
 | `src/STM32F072C8Tx_FLASH.ld` | Memory layout, including the fixed address of the USB device descriptor |
 | `utilities/usb_id.py` | Shows or sets the USB IDs in a built image |
 
 ## Build
 
-Needs the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and GNU make. The Makefile lives in `src/`; from the repository root:
+Needs the GNU Arm toolchain (`arm-none-eabi-gcc` on the PATH), CMake 3.22 or newer and Ninja. The CMake project lives in `src/`:
 
 ```
-make -C src
+cd src
+cmake --preset Release
+cmake --build --preset Release
 ```
 
-The firmware lands in `src/build/pcan_canable.elf`, `.hex` and `.bin`. `make -C src OPT=-Og DEBUG=1` builds a debug image.
+The firmware lands in `src/build/Release/xcan_canable.elf`, `.hex` and `.bin`. The `Debug` preset builds an image for stepping through in a debugger into `src/build/Debug/`.
 
-Every push and pull request to `master` and `develop` is built by GitHub Actions. The run checks that the USB device descriptor sits at its fixed address, then attaches the `.elf`, `.hex`, `.bin` and `utilities/usb_id.py` as the `pcan_canable` artifact.
+In VS Code with the STM32Cube extension, open the `src/` folder itself, not the repository root, and run **STM32Cube: Set up STM32Cube projects** if the extension does not offer it. `src/.settings/` names the device and pins the extension's own CMake, Ninja and GCC, which it downloads on first use, and it builds, flashes and debugs through the same presets. Its GCC is ST's build, so its images differ slightly from the CI images, which use Ubuntu's `gcc-arm-none-eabi`.
 
-Pushing a version tag on a `master` commit also publishes a GitHub Release, with the firmware as `xcan-canable-<tag>.bin`, `.hex` and `.elf` plus `usb_id.py`. A version tag on any other commit fails the release job instead of publishing.
-
-```
-git tag v1.0.0 master
-git push origin v1.0.0
-```
+Prebuilt images come with every GitHub Release as `xcan-canable-<tag>.bin`, `.hex` and `.elf`, together with `usb_id.py`; every push to `master` and `develop` also attaches them to its Actions run as the `xcan_canable` artifact.
 
 ## USB IDs
 
@@ -206,9 +227,9 @@ The firmware keeps its USB device descriptor at a fixed flash address, 0x0800010
 Both are 16-bit little-endian. A build carries the default IDs, 0x0483 and 0x000C. Set the IDs your host driver expects in the image itself, without a rebuild:
 
 ```
-python utilities/usb_id.py pcan_canable.bin                            # show the IDs
-python utilities/usb_id.py pcan_canable.hex --vid 0x1234 --pid 0x5678  # set them in the image
-python utilities/usb_id.py pcan_canable.bin --pid 0x5678 -o board.bin  # write a patched copy
+python utilities/usb_id.py xcan_canable.bin                            # show the IDs
+python utilities/usb_id.py xcan_canable.hex --vid 0x1234 --pid 0x5678  # set them in the image
+python utilities/usb_id.py xcan_canable.bin --pid 0x5678 -o board.bin  # write a patched copy
 ```
 
 The tool needs Python 3 and nothing else. It handles `.bin` and `.hex`, rewriting only the `.hex` records it changes with fresh checksums, and it refuses an image without a device descriptor at 0x08000100. Flash the patched image as below.
@@ -218,7 +239,7 @@ The tool needs Python 3 and nothing else. It handles `.bin` and `.hex`, rewritin
 With an ST-Link on the board's [SWD header](#swd-header) and STM32CubeProgrammer:
 
 ```
-STM32_Programmer_CLI -c port=SWD mode=UR -w src/build/pcan_canable.bin 0x08000000 -v -rst
+STM32_Programmer_CLI -c port=SWD mode=UR -w src/build/Release/xcan_canable.bin 0x08000000 -v -rst
 ```
 
 ## Using it
@@ -240,12 +261,35 @@ cansend can0 123#DEADBEEF
 
 `restart-ms` lets the host restart the channel after a bus-off; without it, `sudo ip link set can0 type can restart` does it by hand. `one-shot on` and `berr-reporting on` enable single-shot transmission and the error counters. The measurements above were made with the Windows CAN Driver; Linux support follows the same protocol but was not measured.
 
+## Tests
+
+`tests/` holds hardware tests for a Windows PC with the Windows CAN Driver and Python 3, without extra packages. The bench is two boards with this firmware on one terminated CAN bus, both on USB; the tests call them A and B in the order the driver numbers them. The tests that look inside the firmware also need board A on an ST-Link and STM32CubeProgrammer or the STM32Cube extension. They find the firmware's variables in `src/build/Release/xcan_canable.elf`, or the file `XCAN_ELF` names, so board A must run that image.
+
+```
+python tests/throughput.py
+```
+
+| Test | What it checks |
+|---|---|
+| `throughput.py` | Every bit rate and frame layout, each direction and both at once, with echo: every frame and echo checked, bus load from each frame's length (the Performance tables) |
+| `latency.py` | Lone frames and their echoes arrive unchanged within 20 ms |
+| `tx_paths.py` | Frames stuck at bus off never reach a later session; frames queued across a listen-only switch all arrive in order |
+| `bus_on_state.py` | An error state left from the last session shows at bus-on and clears once frames get acknowledged |
+| `bus_errors.py` | Bus errors arrive as error frames with type, direction and segment, while sending and while receiving |
+| `bit_timing.py` | Every 1 Mbit/s setting the host offers exchanges frames, and the controller's CAN_BTR holds the expected value |
+| `bus_off.py` | Interactive: a CANH-CANL short sends board A bus-off, and it stays off until the channel restarts |
+| `frame_timing.py` | Report: where bus time goes when board A sends back to back, idle gaps against a stretch every frame shares |
+| `cpu_profile.py` | Report: board A's CPU time per function while it sends, from program counter samples read over SWD |
+
+Each test prints PASS or FAIL and exits with 0 or 1; the ones marked Report always exit with 0.
+
 ## Changes from upstream
 
 - Retargeted to the DykbRadio CANable V1.0 (STM32F072C8T6) alone; the other boards and the STM32F042 build were removed.
 - Bus states: warning and error passive are reported with the error counters, only real state changes are sent, a state carried over from the last session shows at connect, and bus-off holds until the host restarts the channel.
 - Error frames for every bus error, with type, direction and segment.
 - Interrupt-driven receive and transmit, every transmit mailbox in use in load order, full bus rate in both directions.
+- Per-frame work trimmed: the interrupt reads and loads the controller registers itself, frames reach USB without copies, records are packed back to back, and the LEDs update once per main-loop pass, so even echoed frames without data keep the bus full.
 - USB flow control replaces a blocking wait of up to a second per frame; receive back-pressure keeps echoes from being dropped.
 - Echoes are sent when the frame completes on the bus; single-shot frames are honoured.
 - Fixed record corruption (DLC 9 to 15, records on a packet boundary), frames from an old session going out after bus off/on, RTR handling, the USB control path, and IN endpoint recovery after a reset.
