@@ -200,12 +200,19 @@ static void pcan_can_flush_tx( void )
 
   p_msg = &can_dev.tx_fifo[can_dev.tx_tail];
 
-  //- Match automatic retransmission to the frame, switched only while no frame is pending
+  //- Wait for mailbox 0, and finish its previous frame before reuse
+  //? Loading mailbox 0 clears its request-completed flag, so a completion the HAL has not handled yet would never echo.
+  //? One TSR snapshot decides both: once it shows the mailbox empty, no completion can slip in before the load.
+  uint32_t tsr = g_hcan.Instance->TSR; // mailbox 0 state
+  if( !( tsr & CAN_TSR_TME0 ) )
+    return; // mailbox 0 still holds the previous frame
+  if( tsr & CAN_TSR_RQCP0 )
+    HAL_CAN_IRQHandler( &g_hcan ); // run the pending TX-complete callback first
+
+  //- Match automatic retransmission to the frame; mailbox 0 is empty, so no frame is pending
   FunctionalState retransmit = ( p_msg->flags & CAN_FLAG_ONESHOT ) ? DISABLE : ENABLE; // one-shot frames get a single attempt
   if( retransmit != g_hcan.Init.AutoRetransmission )
   {
-    if( !( g_hcan.Instance->TSR & CAN_TSR_TME0 ) )
-      return; // mailbox 0 still holds the previous frame
     g_hcan.Init.AutoRetransmission = retransmit; // HAL_CAN_Init() re-applies it after a re-init
     if( retransmit == ENABLE )
       CLEAR_BIT( g_hcan.Instance->MCR, CAN_MCR_NART ); // retransmit until acknowledged
