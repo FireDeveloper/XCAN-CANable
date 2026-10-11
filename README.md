@@ -39,6 +39,17 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 | Channel open | off, flashes for each sent frame | off, flashes for each received frame |
 | Identify request from the host | fast blink | fast blink |
 
+### SWD header
+
+<img src="docs/swd_pinout.svg" alt="SWD header pinout, top view: pin 1 Vcc (square pad), pin 2 SWDIO, pin 3 SWCLK, pin 4 GND" width="560">
+
+| Pin | Pad | Signal |
+|---|---|---|
+| 1 | square | Vcc |
+| 2 | round | SWDIO |
+| 3 | round | SWCLK |
+| 4 | round | GND |
+
 ## Performance
 
 Measured on the board at 1 Mbit/s (BTR0/BTR1 00h/14h) with the Windows CAN Driver, against a second adapter on the same bus, 20,000 frames per run, echo enabled on the board. Rates are frames per second over the whole run.
@@ -204,26 +215,10 @@ The tool needs Python 3 and nothing else. It handles `.bin` and `.hex`, rewritin
 
 ## Flash
 
-### SWD
-
-With an ST-Link on the board's SWD pads and STM32CubeProgrammer:
+With an ST-Link on the board's [SWD header](#swd-header) and STM32CubeProgrammer:
 
 ```
 STM32_Programmer_CLI -c port=SWD mode=UR -w src/build/pcan_canable.bin 0x08000000 -v -rst
-```
-
-### USB DFU
-
-The STM32F072 has a USB DFU bootloader in system memory. Hold BOOT0 (pin 44) high while plugging in USB, then:
-
-```
-STM32_Programmer_CLI -c port=usb1 -w src/build/pcan_canable.bin 0x08000000 -v -rst
-```
-
-or with dfu-util:
-
-```
-dfu-util -a 0 -s 0x08000000:leave -D src/build/pcan_canable.bin
 ```
 
 ## Using it
