@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/gcc-arm-none-eabi.cmake"
+    },
+    {
+      "name": "Release",
+      "displayName": "Release",
+      "description": "Size-optimized image, as CI builds and publishes it",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "Debug",
+      "displayName": "Debug",
+      "description": "Image for stepping through in a debugger",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "Release", "configurePreset": "Release" },
+    { "name": "Debug", "configurePreset": "Debug" }
+  ]
+}

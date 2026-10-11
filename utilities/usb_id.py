@@ -4,9 +4,9 @@ The firmware keeps its 18-byte USB device descriptor at flash address 0x08000100
 The IDs therefore sit at the same place in every build: the vendor ID at 0x08000108, the product ID at 0x0800010A, both little-endian.
 
 Usage:
-    python utilities/usb_id.py src/build/pcan_canable.bin                            show the IDs
-    python utilities/usb_id.py src/build/pcan_canable.hex --vid 0x1234 --pid 0x5678  set them in the image
-    python utilities/usb_id.py src/build/pcan_canable.bin --pid 0x5678 -o board.bin  write a patched copy
+    python utilities/usb_id.py src/build/Release/xcan_canable.bin                            show the IDs
+    python utilities/usb_id.py src/build/Release/xcan_canable.hex --vid 0x1234 --pid 0x5678  set them in the image
+    python utilities/usb_id.py src/build/Release/xcan_canable.bin --pid 0x5678 -o board.bin  write a patched copy
 """
 
 import argparse

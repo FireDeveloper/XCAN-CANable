@@ -15,26 +15,27 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: install toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi cmake ninja-build
 
       - name: build firmware
-        run: make -C src # the Makefile lives in src/; the images land in src/build/
+        working-directory: src # CMakeLists.txt and its presets live in src/; the images land in src/build/Release/
+        run: cmake --preset Release && cmake --build --preset Release
 
       #? Users set their own USB IDs in the downloaded image with utilities/usb_id.py, which needs the descriptor at its fixed address.
       - name: check the USB descriptor location
         run: >-
-          python3 utilities/usb_id.py src/build/pcan_canable.bin
-          && python3 utilities/usb_id.py src/build/pcan_canable.hex
+          python3 utilities/usb_id.py src/build/Release/xcan_canable.bin
+          && python3 utilities/usb_id.py src/build/Release/xcan_canable.hex
 
       - name: upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: pcan_canable
+          name: xcan_canable
           retention-days: 90 # how long the run keeps the download
           path: |
-            src/build/pcan_canable.elf
-            src/build/pcan_canable.hex
-            src/build/pcan_canable.bin
+            src/build/Release/xcan_canable.elf
+            src/build/Release/xcan_canable.hex
+            src/build/Release/xcan_canable.bin
             utilities/usb_id.py
 
   #? Branch pushes and pull requests stop at the build artifact; only a version tag (v1.0.0) on a master commit publishes a GitHub Release.
@@ -59,12 +60,12 @@ jobs:
       - name: download firmware
         uses: actions/download-artifact@v4
         with:
-          name: pcan_canable
-          path: dist # src/build/ and utilities/ land under dist/
+          name: xcan_canable
+          path: dist # src/build/Release/ and utilities/ land under dist/
 
       - name: name the files after the tag
         run: |
-          for ext in bin hex elf; do mv "dist/src/build/pcan_canable.$ext" "dist/xcan-canable-$GITHUB_REF_NAME.$ext"; done # xcan-canable-v1.0.0.bin and so on
+          for ext in bin hex elf; do mv "dist/src/build/Release/xcan_canable.$ext" "dist/xcan-canable-$GITHUB_REF_NAME.$ext"; done # xcan-canable-v1.0.0.bin and so on
           mv dist/utilities/usb_id.py dist/usb_id.py # the ID tool next to the images
 
       - name: publish the release
