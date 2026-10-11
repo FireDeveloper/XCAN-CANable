@@ -20,6 +20,8 @@ USB-to-CAN firmware for the DykbRadio "CANable V1.0" (STM32F072C8T6). It impleme
 
 ## Hardware
 
+<img src="docs/dykbradio_canable_v1.0.png" alt="DykbRadio CANable V1.0" width="480">
+
 | Item | Value |
 |---|---|
 | Board | DykbRadio "CANable V1.0" |
