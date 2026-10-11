@@ -27,7 +27,7 @@ static struct
     uint8_t   ecc;
     uint8_t   rx_err;
     uint8_t   tx_err;
-    uint8_t   bus_state; // CAN_BUS_STATE_* of the controller at the last poll
+    uint8_t   bus_state; // CAN_BUS_STATE_* last reported to the host, or owed to it while err_pending is set
     uint8_t   err_pending; // a state change has not reached the host in an error record yet
     /* config */
     uint8_t   btr0;
@@ -756,11 +756,14 @@ void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
 
           if( pcan_device.bus_active )
           {
-            //? A PCAN-USB reports only changes of its controller's state, so a state left from before the bus-on is not announced, only its end.
-            //? That covers a bus-off still recovering after a restart and error counters carried over from the last session.
+            //? The host starts every session from error active, but the controller keeps its error counters across bus off/on.
+            //? Measuring from error active makes pcan_bus_state_poll() report a warning or passive state left from the last session.
+            //? A bus-off still running its recovery after a restart stays unannounced, so a restart does not show the host a fresh bus-off.
             can_bus_status_t status;
             pcan_can_get_bus_status( &status ); // controller state as the bus comes on
-            pcan_device.can.bus_state = status.state; // later changes are measured from here
+            pcan_device.can.bus_state = CAN_BUS_STATE_ACTIVE; // the state the host assumes at bus-on
+            if( status.state == CAN_BUS_STATE_OFF )
+              pcan_device.can.bus_state = CAN_BUS_STATE_OFF; // only the end of the recovery gets reported
             pcan_device.can.err_pending = 0; // nothing owed to the host yet
             /* provide first timesync event */
             pcan_device.last_timestamp_sync = pcan_timestamp_ticks();
