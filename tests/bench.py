@@ -21,11 +21,17 @@ CHANNELS = (CHANNEL_A, CHANNEL_B)  # both boards
 NAMES = {CHANNEL_A: "A", CHANNEL_B: "B"}  # short names in reports
 SIDES = {CHANNEL_A: 0, CHANNEL_B: 1}  # identifier space each board sends in, so the boards never send the same identifier
 
+#? Traffic modes are named from board A, the board under test.
+TX_ONLY = "Tx Only"  # board A sends, board B receives and acknowledges
+RX_ONLY = "Rx Only"  # board B sends, board A receives
+RXTX = "RxTx"  # both boards send at once
+
 #? The driver takes the SJA1000 BTR0/BTR1 pair as its bit rate code; these are its standard settings.
 BIT_RATES = {1000: 0x0014, 500: 0x001C, 250: 0x011C, 125: 0x031C}  # kbit/s -> BTR0/BTR1
 
 OK = 0x00000  # status without error flags
 QRCVEMPTY = 0x00020  # status: the receive queue is empty
+MAX_FAILED_READS = 100  # reads in a row without a message before a drain gives up on a channel
 QXMTFULL = 0x00080  # status: the transmit queue is full
 STATUS_NAMES = {  # status flags by bit
     0x00001: "XMTFULL", 0x00002: "OVERRUN", 0x00004: "BUSLIGHT", 0x00008: "BUSHEAVY", 0x00010: "BUSOFF", 0x00020: "QRCVEMPTY",
@@ -346,15 +352,23 @@ class Capture:
 
         Args:
             channel: CHANNEL_A or CHANNEL_B.
+
+        Raises:
+            RuntimeError: Reads keep failing without a message, as on a channel that is closed or a board that left USB.
         """
         message, stamp = Message(), Timestamp()  # reused for each read
+        failed = 0  # reads in a row that returned no message
         while True:  # until the queue is empty
             status = driver.CAN_Read(channel, ctypes.byref(message), ctypes.byref(stamp))  # next message
             if status & QRCVEMPTY:  # nothing left
                 return  # queue drained
-            if status != OK:  # overrun or other trouble
+            if status != OK:  # overrun, a bus state change or other trouble
                 self.notes.append("read " + status_text(status))  # keep the reason
+                failed += 1  # one more read without a message
+                if failed >= MAX_FAILED_READS:  # the status does not go away
+                    raise RuntimeError("reading channel 0x%X keeps failing: %s" % (channel, status_text(status)))  # stop instead of spinning forever
                 continue  # next message
+            failed = 0  # a message came
             if message.MSGTYPE & (MSG_STATUS | MSG_ERRFRAME):  # report, not a frame
                 kind = "status" if message.MSGTYPE & MSG_STATUS else "errframe"  # which report
                 self.notes.append("%s 0x%X %s" % (kind, message.ID, bytes(message.DATA[:message.LEN]).hex(" ")))  # keep it as text
@@ -561,3 +575,31 @@ def whole_bus(kind, kbps, channel, captures):
     own, _ = decode(kind, SIDES[channel], captures[channel].echoes)  # this board's frames, when they left
     theirs, _ = decode(kind, SIDES[other], captures[channel].frames)  # the other board's frames, when they arrived
     return rate_and_load(kind, kbps, sorted(own + theirs))  # one timeline
+
+
+def bus_share(kind, kbps, channel, captures):
+    """Split the whole bus one channel saw between its own frames and the other board's, over the same span.
+
+    Args:
+        kind: FrameKind sent by both boards.
+        kbps: Bit rate.
+        channel: Channel whose view to use.
+        captures: {channel: Capture} from send_burst().
+
+    Returns:
+        ((frames per second, percent of the bus) of the channel's own frames, the same for the other board's frames).
+        Both share whole_bus()'s span, so they add up to it.
+    """
+    other = CHANNEL_B if channel == CHANNEL_A else CHANNEL_A  # the other board
+    own, _ = decode(kind, SIDES[channel], captures[channel].echoes)  # this board's frames, when they left
+    theirs, _ = decode(kind, SIDES[other], captures[channel].frames)  # the other board's frames, when they arrived
+    timeline = sorted(own + theirs)  # one timeline, as in whole_bus()
+    if len(timeline) < 2 or timeline[-1][0] <= timeline[0][0]:  # no span to measure
+        return (0.0, 0.0), (0.0, 0.0)  # nothing to report
+    span = (timeline[-1][0] - timeline[0][0]) / 1e6  # seconds from the first frame to the last
+    shares = []  # this board's share, then the other board's
+    for side in (SIDES[channel], SIDES[other]):  # each board's frames
+        later = [entry for entry in timeline[1:] if entry[1] == side]  # as in rate_and_load(), the first frame only opens the span
+        wire = sum(wire_bits(kind, side, sequence) for _, _, sequence in later)  # bit times they took
+        shares.append((len(later) / span, 100.0 * wire / (span * kbps * 1000.0)))  # frames/s and percent of bus time
+    return shares[0], shares[1]  # this board, the other board

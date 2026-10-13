@@ -227,8 +227,11 @@ uint16_t pcan_usb_send_data_buffer( const void *p, uint16_t size )
 
 void pcan_usb_poll( void )
 {
-  //- Service the USB peripheral
-  HAL_PCD_IRQHandler( &hpcd_USB_FS ); // run the USB events polled instead of interrupt-driven
+  //- Service the USB peripheral when an event is pending
+  //? HAL_PCD_IRQHandler() reads ISTR once for every flag it checks, which on an idle pass costs more than the rest of the main loop.
+  const uint32_t events = USB_ISTR_CTR | USB_ISTR_RESET | USB_ISTR_PMAOVR | USB_ISTR_ERR | USB_ISTR_WKUP | USB_ISTR_SUSP | USB_ISTR_L1REQ | USB_ISTR_SOF | USB_ISTR_ESOF; // the flags it handles
+  if( hpcd_USB_FS.Instance->ISTR & events )
+    HAL_PCD_IRQHandler( &hpcd_USB_FS ); // run the USB events polled instead of interrupt-driven
 
   //- Resume a paused data endpoint once the TX FIFO has room again
   if( msgout_paused && ( hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED ) && hUsbDeviceFS.pClassData )

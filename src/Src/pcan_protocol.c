@@ -556,15 +556,14 @@ static uint8_t pcan_bus_error_ecc( uint8_t bus_err )
 }
 
 /**
- * @brief Latch CAN controller error events for the next error record, and report bus errors when the host asked for them.
- * @param[in] err     CAN_ERROR_FLAG_* events from the controller.
- * @param[in] bus_err The last bus error, a CAN_LEC_* code with CAN_BUS_ERR_RX; read only with CAN_ERROR_FLAG_BUS_ERR.
- * @param[in] rx_err  Receive error counter.
- * @param[in] tx_err  Transmit error counter.
+ * @brief Latch CAN controller error events for the next error record.
+ * @param[in] err    CAN_ERROR_FLAG_* events from the controller.
+ * @param[in] rx_err Receive error counter.
+ * @param[in] tx_err Transmit error counter.
  * @note Bus-off is not latched here; pcan_bus_state_poll() reports it as a state change.
- * @note Bus errors since the last poll share one bus event record, carrying the last one; PCAN_USB_ERR_ECC in the host's mask enables them.
+ * @note Bus errors arrive one by one through pcan_can_bus_error().
  */
-static void pcan_can_error( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err )
+static void pcan_can_error( uint8_t err, uint8_t rx_err, uint8_t tx_err )
 {
   pcan_device.can.rx_err = rx_err;
   pcan_device.can.tx_err = tx_err;
@@ -574,12 +573,31 @@ static void pcan_can_error( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_
   {
     pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR; // the controller's RX FIFO dropped frames
   }
+}
 
-  //- Report the bus error the way a CAN-USB adapter reports its SJA1000 bus error interrupt
-  if( !( err & CAN_ERROR_FLAG_BUS_ERR ) || !( pcan_device.can.err_mask & PCAN_USB_ERR_ECC ) )
-    return; // no bus error, or the host did not ask for them
+/**
+ * @brief Report one bus error the way a CAN-USB adapter reports its SJA1000 bus error interrupt; pcan_can_poll() calls it for each queued error.
+ * @param[in] bus_err CAN_LEC_* code, with CAN_BUS_ERR_RX when no TX mailbox was pending.
+ * @param[in] rx_err  Receive error counter at the error.
+ * @param[in] tx_err  Transmit error counter at the error.
+ * @return 1 when the error is reported or not wanted, 0 when the record buffer is full and USB still sends; the error then stays queued.
+ * @note PCAN_USB_ERR_ECC in the host's mask enables bus errors, and each one gets its own bus event record.
+ */
+static int pcan_can_bus_error( uint8_t bus_err, uint8_t rx_err, uint8_t tx_err )
+{
+  //- Drop the error while the channel is closed or the host does not ask for bus errors
+  if( !pcan_device.bus_active || !( pcan_device.can.err_mask & PCAN_USB_ERR_ECC ) )
+    return 1; // taken, nothing to report
+
+  //- Record it, flushing a full buffer to USB first
   pcan_device.can.ecc = pcan_bus_error_ecc( bus_err ); // error code capture for the record
-  pcan_bus_event( &pcan_records, PCAN_USB_ERR_CNT_INC ); // a bus error raises a counter; dropped when the buffer is full
+  pcan_device.can.rx_err = rx_err; // counters at this error
+  pcan_device.can.tx_err = tx_err;
+  if( pcan_bus_event( &pcan_records, PCAN_USB_ERR_CNT_INC ) )
+    return 1; // reported
+  if( !pcan_record_buffer_flush( &pcan_records ) )
+    return 0; // USB still sends the previous transfer; pcan_can_poll() offers the error again
+  return pcan_bus_event( &pcan_records, PCAN_USB_ERR_CNT_INC ); // reported in the emptied buffer
 }
 
 /**
@@ -1045,6 +1063,7 @@ void pcan_protocol_init( void )
   pcan_can_init();
   pcan_can_install_rx_callback( pcan_rx_message  );
   pcan_can_install_error_callback( pcan_can_error );
+  pcan_can_install_bus_error_callback( pcan_can_bus_error ); // one bus event record per bus error
 }
 
 void pcan_protocol_poll( void )

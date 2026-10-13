@@ -1,4 +1,4 @@
-"""Where board A's CPU time goes while it sends back to back, from program counter samples read over SWD.
+"""Where board A's CPU time goes in Tx Only, while it sends back to back, from program counter samples read over SWD.
 
 Usage:
     python tests/cpu_profile.py               11-bit frames without data at 1 Mbit/s, echo on
@@ -46,7 +46,7 @@ def main():
     """
     #^ Prepare
     #- Options and the image's functions
-    parser = argparse.ArgumentParser(description="Profile board A over SWD while it sends back to back.")  # command line
+    parser = argparse.ArgumentParser(description="Profile board A over SWD in Tx Only, while it sends back to back.")  # command line
     parser.add_argument("--echo-off", action="store_true", help="send without echoes")  # less work per frame
     parser.add_argument("--kind", type=int, default=3, choices=range(len(bench.KINDS)), help="frame layout, index into bench.KINDS")  # layout
     options = parser.parse_args()  # parsed
@@ -85,7 +85,7 @@ def main():
 
     #- Count the samples per function
     histogram = collections.Counter(name_of(address) for address in samples)  # samples per function
-    print("%d samples, %s at %d kbit/s, echo %s" % (len(samples), kind.name, KBPS, "off" if options.echo_off else "on"))  # what was measured
+    print("%d samples, %s, %s at %d kbit/s, echo %s" % (len(samples), bench.TX_ONLY, kind.name, KBPS, "off" if options.echo_off else "on"))  # what was measured
     for name, count in histogram.most_common(TOP):  # busiest first
         print("  %5.1f %%  %s" % (100.0 * count / len(samples), name))  # share and function
     return 0  # informational

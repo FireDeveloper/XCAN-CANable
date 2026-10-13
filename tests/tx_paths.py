@@ -1,10 +1,11 @@
-"""Transmit path checks: frames stuck at bus off never reach a later session, and queued frames survive a listen-only switch.
+"""Transmit path checks: frames stuck at bus off are never echoed and never reach a later session, and queued frames survive a listen-only switch.
 
 Usage:
     python tests/tx_paths.py
 
 Board A is the board under test and board B its partner.
-Part 1: B listens only, so A's frames stay unacknowledged and stuck in A; after A leaves and rejoins the bus, B must see none of them, then A's new frames.
+Part 1: B listens only, so A's frames stay unacknowledged and stuck in A, and A must echo none of them.
+After A leaves and rejoins the bus, B must see none of them, then A's new frames.
 Part 2: A switches listen-only on and off while frames wait in its queue; B must still receive every one of them, in order.
 """
 
@@ -25,18 +26,24 @@ def main():
     """Run both parts.
 
     Returns:
-        0 when nothing replays and nothing is lost, 1 otherwise.
+        0 when nothing is echoed before it completes, nothing replays and nothing is lost, 1 otherwise.
     """
     btr = bench.BIT_RATES[KBPS]  # bit timing of both boards
     failures = []  # what went wrong
 
-    #^ Part 1: no replay after bus off and on
+    #^ Part 1: no echo and no replay for frames that never completed
     #- Frames stuck in A while nothing acknowledges
     bench.open_channel(bench.CHANNEL_B, btr, listen_only=True)  # B hears without acknowledging
-    bench.open_channel(bench.CHANNEL_A, btr)  # board under test
+    bench.open_channel(bench.CHANNEL_A, btr, echo=True)  # board under test, echoing each frame once it completes
     queued = bench.send_frames(bench.CHANNEL_A, STUCK_ID, 30)  # frames that cannot complete
     time.sleep(0.3)  # A keeps retrying them
-    print("A queued %d frames nobody acknowledges, status %s" % (queued, bench.status_text(bench.channel_status(bench.CHANNEL_A))))  # stuck frames
+    capture = bench.Capture()  # what A delivered meanwhile
+    capture.drain(bench.CHANNEL_A)  # echoes and status reports
+    echoed = [entry for entry in capture.echoes if entry[1] == STUCK_ID]  # echoes of frames still unacknowledged
+    status = bench.status_text(bench.channel_status(bench.CHANNEL_A))  # A while its frames are stuck
+    print("A queued %d frames nobody acknowledges and echoed %d of them, status %s" % (queued, len(echoed), status))  # stuck frames
+    if echoed:  # an echo reports a frame that never left
+        failures.append("frames nobody acknowledged were echoed")  # echo without completion
     bench.close_channels()  # bus off drops A's queue
 
     #- A new session sends only new frames

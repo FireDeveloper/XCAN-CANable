@@ -1,4 +1,4 @@
-"""Where bus time goes when board A sends back to back: idle gaps between frames, or every frame running long.
+"""Where bus time goes in Tx Only, board A sending back to back: idle gaps between frames, or every frame running long.
 
 Usage:
     python tests/frame_timing.py
@@ -60,8 +60,8 @@ def timing_run(kbps, btr, kind, count, echo):
     excess = [(b[0] - a[0]) - bench.wire_bits(kind, b[1], b[2]) * bit_us for a, b in zip(frames, frames[1:])]  # time beyond each frame
     gaps = [value for value in excess if value > GAP_US]  # idle gaps
     per_frame_ns = (span - wire) / (len(frames) - 1) * 1000  # average excess per frame
-    return "%5dk %02Xh/%02Xh %-9s echo %-3s frames %6d bad %d | load %.3f %% | %+.0f ns per frame (%+.3f bit) | gaps over %.0f us: %d, %.2f ms in them" % (
-        kbps, btr >> 8, btr & 0xFF, kind.name, "on" if echo else "off", len(frames), bad, 100.0 * wire / span, per_frame_ns, per_frame_ns / 1000 / bit_us,
+    return "%s %5dk %02Xh/%02Xh %-9s echo %-3s frames %6d bad %d | load %.3f %% | %+.0f ns per frame (%+.3f bit) | gaps over %.0f us: %d, %.2f ms in them" % (
+        bench.TX_ONLY, kbps, btr >> 8, btr & 0xFF, kind.name, "on" if echo else "off", len(frames), bad, 100.0 * wire / span, per_frame_ns, per_frame_ns / 1000 / bit_us,
         GAP_US, len(gaps), sum(gaps) / 1000)  # one line per run
 
 

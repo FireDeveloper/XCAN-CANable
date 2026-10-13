@@ -1,11 +1,13 @@
-"""Throughput of the XCAN firmware between two boards: every bit rate and frame layout, each direction alone and both at once, echo on.
+"""Throughput of the XCAN firmware between two boards: every bit rate and frame layout in Tx Only, Rx Only and RxTx, echo on.
 
 Usage:
     python tests/throughput.py              every bit rate in bench.BIT_RATES
     python tests/throughput.py 1000 500     only these, in kbit/s
 
+The modes are named from board A: Tx Only, A sends to B; Rx Only, B sends to A; RxTx, both send at once.
 Every frame and every echo is checked against what was sent, and any loss, duplicate, reordering, corruption, missing echo or error state fails the test.
 Load is the share of bus time the frames used, from each frame's exact length on the wire, so 100% means back to back.
+In RxTx each direction's rate and load are its share of the whole bus as board A saw it, so the directions add up to the bus total.
 With the probe and the board's ELF (see probe.py), the probed board's firmware counters must also stay free of errors and overflows.
 """
 
@@ -91,11 +93,17 @@ def main():
         for kind in bench.KINDS:  # each frame layout
             count = burst_size(kind, kbps)  # frames per sender
             print("\n%dk %s, %d frames per sender" % (kbps, kind.name, count))  # case header
-            for mode, senders in (("one way", [bench.CHANNEL_A]), ("one way", [bench.CHANNEL_B]), ("both", list(bench.CHANNELS))):  # directions
+            for mode, senders in ((bench.TX_ONLY, [bench.CHANNEL_A]), (bench.RX_ONLY, [bench.CHANNEL_B]), (bench.RXTX, list(bench.CHANNELS))):  # traffic modes
                 #- Send and check every frame and echo
                 captures, sent, full = bench.send_burst(kind, count, senders)  # the burst
+                rows = {sender: bench.direction(kind, kbps, sender, captures, sent) for sender in senders}  # delivery and echoes per direction
+                if mode == bench.RXTX:  # both boards sent
+                    #? Each direction's own first-to-last span overlaps the other's, so its share of one common timeline is what adds up to the bus.
+                    a_share, b_share = bench.bus_share(kind, kbps, bench.CHANNEL_A, captures)  # A->B and B->A as board A saw them
+                    rows[bench.CHANNEL_A].update(rate=a_share[0], load=a_share[1])  # A's share of the bus
+                    rows[bench.CHANNEL_B].update(rate=b_share[0], load=b_share[1])  # B's share of the bus
                 for sender in senders:  # each direction in the burst
-                    row = bench.direction(kind, kbps, sender, captures, sent)  # delivery and echoes
+                    row = rows[sender]  # delivery and echoes
                     row.update(kbps=kbps, kind=kind.name, mode=mode)  # where it belongs in the summary
                     summary.append(row)  # for the table at the end
                     print("  %-7s %s  sent %5d  received %5d  lost %d  dup %d  gaps %d  bad %d | %6.0f/s %5.1f %% | echoes %5d gaps %d %6.0f/s | queue full %d" % (
@@ -105,11 +113,11 @@ def main():
                         failures.append("%dk %s %s %s: frames or echoes wrong" % (kbps, kind.name, mode, row["dir"]))  # name the run
 
                 #- Whole bus and channel states
-                if len(senders) == 2:  # both boards sent
+                if mode == bench.RXTX:  # both boards sent
                     for channel in bench.CHANNELS:  # each board's view
                         rate, load = bench.whole_bus(kind, kbps, channel, captures)  # both directions together
-                        print("  both    whole bus seen by %s: %6.0f/s %5.1f %%" % (bench.NAMES[channel], rate, load))  # bus total
-                        viewer = "seen by " + bench.NAMES[channel]  # whose timestamps
+                        print("  %-7s bus seen by %s: %6.0f/s %5.1f %%" % (mode, bench.NAMES[channel], rate, load))  # bus total
+                        viewer = "bus by " + bench.NAMES[channel]  # whose timestamps
                         summary.append({"kbps": kbps, "kind": kind.name, "mode": "bus", "dir": viewer, "rate": rate, "load": load})  # bus total
                 for channel in bench.CHANNELS:  # after every burst
                     status = bench.channel_status(channel)  # warning, passive or worse
@@ -124,7 +132,7 @@ def main():
             if counters and now:  # both reads worked
                 delta = {name: (now[name] - counters[name]) & 0xFFFFFFFF for name in probe.COUNTERS}  # change, wrap-safe
                 print("  firmware counters of %s: %s" % (bench.NAMES[probed], ", ".join("%s +%d" % item for item in delta.items())))  # the changes
-                if delta["tx_errs"] or delta["tx_ovfs"] or delta["rx_errs"] or delta["rx_ovfs"]:  # errors or overflows
+                if delta["tx_errs"] or delta["tx_ovfs"] or delta["bus_errs"] or delta["rx_ovfs"] or delta["bus_err_ovfs"]:  # errors or overflows
                     failures.append("%dk %s: firmware counted errors or overflows" % (kbps, kind.name))  # name the layout
             counters = now or counters  # next baseline
         bench.close_channels()  # before the next bit rate
@@ -136,7 +144,7 @@ def main():
     for row in summary:  # every direction and bus total
         is_bus = row["mode"] == "bus"  # bus total rows count no frames
         counts = ("",) * 5 if is_bus else (row["sent"], row["received"], row["lost"], row["gaps"], row["bad"])  # frame counts
-        mode = "both" if is_bus else row["mode"]  # bus totals come from the both-ways bursts
+        mode = bench.RXTX if is_bus else row["mode"]  # bus totals come from the RxTx bursts
         print(layout % (("%dk" % row["kbps"], row["kind"], mode, row["dir"]) + counts + ("%.0f" % row["rate"], "%.1f%%" % row["load"])))  # one row
 
     #- Verdict

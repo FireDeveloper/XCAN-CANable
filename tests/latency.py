@@ -4,6 +4,7 @@ Usage:
     python tests/latency.py
 
 Frames go out one at a time with pauses, so each travels alone through the firmware's USB path, including the zero-length packet that ends a transfer.
+Rx Only: board B sends and board A receives; Tx Only: board A sends, board B receives and A gets each echo.
 Fails when a frame or an echo goes missing, arrives changed, or takes longer than LIMIT_MS.
 """
 
@@ -75,7 +76,7 @@ def spread(values):
 
 
 def main():
-    """Time lone frames in both directions and echoes on board A.
+    """Time lone frames in Rx Only and Tx Only, and board A's echoes.
 
     Returns:
         0 when every frame and echo arrived unchanged within LIMIT_MS, 1 otherwise.
@@ -93,14 +94,14 @@ def main():
 
     #- Time each direction
     failures = []  # what went wrong
-    for sender, want_echo in ((bench.CHANNEL_B, False), (bench.CHANNEL_A, True)):  # B's frames through A, then A's frames and echoes
+    for mode, sender, want_echo in ((bench.RX_ONLY, bench.CHANNEL_B, False), (bench.TX_ONLY, bench.CHANNEL_A, True)):  # B to A, then A to B with echoes
         received, bad, frame_ms, echo_ms = lone_frames(sender, want_echo)  # the run
-        print("%s sends %d lone frames: received %d, bad %d | receive %s | echo %s" % (
-            bench.NAMES[sender], FRAMES, received, bad, spread(frame_ms), spread(echo_ms) if want_echo else "-"))  # results
+        print("%s, %s sends %d lone frames: received %d, bad %d | receive %s | echo %s" % (
+            mode, bench.NAMES[sender], FRAMES, received, bad, spread(frame_ms), spread(echo_ms) if want_echo else "-"))  # results
         if received != FRAMES or bad or (frame_ms and max(frame_ms) > LIMIT_MS):  # missing, changed or slow frames
-            failures.append("%s: frames missing, changed or slower than %.0f ms" % (bench.NAMES[sender], LIMIT_MS))  # name the direction
+            failures.append("%s: frames missing, changed or slower than %.0f ms" % (mode, LIMIT_MS))  # name the mode
         if want_echo and (len(echo_ms) != FRAMES or (echo_ms and max(echo_ms) > LIMIT_MS)):  # missing or slow echoes
-            failures.append("%s: echoes missing or slower than %.0f ms" % (bench.NAMES[sender], LIMIT_MS))  # name the direction
+            failures.append("%s: echoes missing or slower than %.0f ms" % (mode, LIMIT_MS))  # name the mode
     bench.close_channels()  # bus off
 
     #- Verdict

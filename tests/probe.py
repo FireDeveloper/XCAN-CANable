@@ -21,8 +21,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repository
 DEFAULT_ELF = os.path.join(REPO, "src", "build", "Release", "xcan_canable.elf")  # image of the Release preset
 CAN_ESR = 0x40006418  # bxCAN error status: TEC, REC and the warning, passive and bus-off flags
 CAN_BTR = 0x4000641C  # bxCAN bit timing
+BTR_FIELDS = 0x037F03FF  # SJW, TS2, TS1 and BRP fields of CAN_BTR, mode bits left out
 DWT_PCSR = 0xE000101C  # program counter sample register
-COUNTERS = ("tx_msgs", "tx_errs", "tx_ovfs", "rx_msgs", "rx_errs", "rx_ovfs")  # the counters can_dev in src/Src/pcan_can.c starts with
+COUNTERS = ("tx_msgs", "tx_errs", "tx_ovfs", "rx_msgs", "bus_errs", "rx_ovfs", "bus_err_ovfs")  # the counters can_dev in src/Src/pcan_can.c starts with
 
 
 def programmer():
@@ -165,6 +166,39 @@ def function_finder(symbols):
             return functions[index][2]  # found
         return "?"  # between functions, or code without a symbol
     return name_of  # the lookup
+
+
+#& Bit timing
+
+
+def can_btr_for(btr):
+    """Compute the CAN_BTR fields the firmware programs for a host bit timing.
+
+    Args:
+        btr: BTR0/BTR1 pair on the host's 8 MHz time base.
+
+    Returns:
+        (CAN_BTR fields, sample point as a fraction); the firmware applies the timing as given on its 48 MHz clock.
+    """
+    btr0, btr1 = btr >> 8, btr & 0xFF  # the two registers
+    brp, sjw = (btr0 & 0x3F) + 1, (btr0 >> 6) + 1  # prescaler and jump width
+    tseg1, tseg2 = (btr1 & 0x0F) + 1, ((btr1 >> 4) & 0x7) + 1  # time segments in quanta
+    fields = ((sjw - 1) << 24) | ((tseg2 - 1) << 20) | ((tseg1 - 1) << 16) | (brp * 6 - 1)  # CAN_BTR layout, 48 MHz clock
+    return fields, (1 + tseg1) / (1 + tseg1 + tseg2)  # register value and sample point
+
+
+def bit_time_us(btr):
+    """Compute the length of one bit for a host bit timing.
+
+    Args:
+        btr: BTR0/BTR1 pair on the host's 8 MHz time base.
+
+    Returns:
+        Microseconds per bit.
+    """
+    btr0, btr1 = btr >> 8, btr & 0xFF  # the two registers
+    quanta = 1 + (btr1 & 0x0F) + 1 + ((btr1 >> 4) & 0x7) + 1  # sync, segment 1 and segment 2
+    return ((btr0 & 0x3F) + 1) * 0.125 * quanta  # each quantum lasts the prescaler times 125 ns
 
 
 #& Firmware state

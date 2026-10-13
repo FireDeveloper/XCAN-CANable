@@ -9,6 +9,7 @@
 #define CAN_TX_MAILBOXES (3) // bxCAN transmit mailboxes
 #define CAN_RX_RING_SIZE (128) // frames and echoes the CAN interrupt can queue ahead of the main loop
 #define CAN_RX_RESERVE (64) // RX ring slots kept for frames from other nodes while echoes wait for USB
+#define CAN_ERR_RING_SIZE (64) // bus errors the CAN interrupt can queue ahead of the main loop; a power of two, as its indexes wrap with a mask
 static CAN_HandleTypeDef g_hcan = { .Instance = CAN };
 #define INTERNAL_CAN_IT_FLAGS          (  CAN_IT_TX_MAILBOX_EMPTY |\
                                           CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING |\
@@ -27,8 +28,9 @@ static struct
   uint32_t tx_ovfs;
 
   uint32_t rx_msgs;
-  uint32_t rx_errs;
+  uint32_t bus_errs; // bus errors the controller detected, while sending or receiving
   uint32_t rx_ovfs;
+  uint32_t bus_err_ovfs; // bus errors lost to a full error ring
 
   //? The main loop fills the TX FIFO and the CAN interrupt empties it, so each index has a single writer.
   //? pcan_can_set_bus_active() resets both with the interrupt masked.
@@ -47,10 +49,14 @@ static struct
   can_message_t rx_ring[CAN_RX_RING_SIZE]; // received frames and echoes waiting for the main loop
   volatile uint32_t rx_head; // next slot the interrupt fills
   volatile uint32_t rx_tail; // next slot the main loop reads
+  //? The CAN interrupt fills the error ring and the main loop empties it, so each index has a single writer.
+  uint32_t err_ring[CAN_ERR_RING_SIZE]; // bus errors waiting for the main loop: CAN_LEC_* with CAN_BUS_ERR_RX, REC in bits 15-8, TEC in bits 23-16
+  volatile uint32_t err_head; // next slot the interrupt fills
+  volatile uint32_t err_tail; // next slot the main loop reads
   volatile uint8_t isr_err; // CAN_ERROR_FLAG_* events the interrupt latched for the main loop
-  volatile uint8_t isr_bus_err; // CAN_LEC_* of the last bus error, with CAN_BUS_ERR_RX
   int (*rx_cb)( const can_message_t * );
-  void (*can_err_cb)( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err );
+  void (*can_err_cb)( uint8_t err, uint8_t rx_err, uint8_t tx_err );
+  int (*bus_err_cb)( uint8_t bus_err, uint8_t rx_err, uint8_t tx_err );
 }
 can_dev = { 0 };
 
@@ -183,17 +189,12 @@ void pcan_can_set_bitrate( uint16_t brp, uint8_t tseg1, uint8_t tseg2, uint8_t s
   if( tseg2 > 8 )
     tseg2 = 8;
 
-  //- Split each host time quantum in two when segment 1 is a single quantum
-  //? With a 1-quantum segment 1 (BTR1 10h at 1 Mbit/s) bxCAN went bus-off on this board, while the same timing in half-length quanta works.
-  uint32_t split = ( ( tseg1 == 1 ) && ( tseg2 <= 4 ) ) ? 2u : 1u; // bxCAN quanta per host quantum
-  uint32_t sjw_split = ( sjw * split > 4u ) ? 4u : sjw * split; // jump width in bxCAN quanta, at most 4
-
-  /* CAN bus freq is 48 */
-  g_hcan.Init.Prescaler = brp * 6 / split; // 48 MHz clocks per bxCAN quantum
-
-  g_hcan.Init.SyncJumpWidth = sjw_table[sjw_split - 1];
-  g_hcan.Init.TimeSeg1 = tseg1_table[( tseg1 + 1 ) * split - 2]; // sync and segment 1 keep their length, so the sample point stays
-  g_hcan.Init.TimeSeg2 = tseg2_table[tseg2 * split - 1];
+  //- Apply the host's timing as given
+  //? A 1-quantum segment 1 (BTR1 10h at 1 Mbit/s) passes no frames on this board's bxCAN; it is applied as asked, and the README names the working settings.
+  g_hcan.Init.Prescaler = brp * 6; // 48 MHz clocks per quantum, brp cycles of the host's 8 MHz
+  g_hcan.Init.SyncJumpWidth = sjw_table[sjw - 1];
+  g_hcan.Init.TimeSeg1 = tseg1_table[tseg1 - 1];
+  g_hcan.Init.TimeSeg2 = tseg2_table[tseg2 - 1];
 
   pcan_can_reinit(); // apply the timing, back on the bus when it was on
 }
@@ -203,9 +204,14 @@ void pcan_can_install_rx_callback( int (*cb)( const can_message_t * ) )
   can_dev.rx_cb = cb;
 }
 
-void pcan_can_install_error_callback( void (*cb)( uint8_t err, uint8_t bus_err, uint8_t rx_err, uint8_t tx_err ) )
+void pcan_can_install_error_callback( void (*cb)( uint8_t err, uint8_t rx_err, uint8_t tx_err ) )
 {
   can_dev.can_err_cb = cb;
+}
+
+void pcan_can_install_bus_error_callback( int (*cb)( uint8_t bus_err, uint8_t rx_err, uint8_t tx_err ) )
+{
+  can_dev.bus_err_cb = cb; // pcan_can_poll() hands it the queued bus errors
 }
 
 /**
@@ -386,6 +392,7 @@ int pcan_can_set_bus_active( uint16_t mode )
   if( HAL_CAN_GetState( &g_hcan ) != HAL_CAN_STATE_READY )
     HAL_CAN_Init( &g_hcan ); // leave the error state a failed start or stop left behind
   pcan_can_tx_fifo_clear(); // nothing queued outlives the session
+  can_dev.err_tail = can_dev.err_head; // bus errors of the old session are not reported in the next
 
   //- Join the bus when asked; leaving init mode also starts the bus-off recovery sequence
   if( mode && ( HAL_CAN_Start( &g_hcan ) != HAL_OK ) )
@@ -454,6 +461,61 @@ static void pcan_can_rx_push( const can_message_t *p_msg )
   can_dev.rx_ring[head] = *p_msg; // fill the free slot
   __DMB(); // finish the copy before the main loop can see the new head
   can_dev.rx_head = next; // hand the slot to the main loop
+}
+
+/**
+ * @brief Queue a bus error for the main loop, with its direction and the error counters at that moment.
+ * @param[in] lec CAN_LEC_* code of the error.
+ * @param[in] esr ESR as the error was taken, for the error counters.
+ * @param[in] tsr TSR as the error was taken; a pending mailbox makes the board the transmitter.
+ * @note Runs in the CAN interrupt; an error that finds the ring full is counted in bus_err_ovfs and lost.
+ */
+static inline void pcan_can_bus_error_push( uint32_t lec, uint32_t esr, uint32_t tsr )
+{
+  uint32_t head = can_dev.err_head; // only the interrupt moves the head
+  uint32_t next = ( head + 1u ) & ( CAN_ERR_RING_SIZE - 1u ); // slot after this one
+
+  //- Count every error, also one the ring has no room for
+  ++can_dev.bus_errs; // bus errors the controller detected
+  if( next == can_dev.err_tail )
+  {
+    ++can_dev.bus_err_ovfs; // bus errors lost to a full ring
+    return; // ring full
+  }
+
+  //- Pack the error with its direction and both counters
+  //? ESR keeps REC in bits 31-24 and TEC in bits 23-16, so one shift puts REC in bits 15-8 and TEC stays in place.
+  uint32_t entry = lec | ( ( esr >> 16 ) & 0xFF00u ); // CAN_LEC_* code and the receive error counter
+  //? ESR.TEC is the low byte of a 9-bit counter and wraps at bus-off, as in pcan_can_get_bus_status().
+  entry |= ( esr & CAN_ESR_BOFF ) ? 0xFF0000u : ( esr & CAN_ESR_TEC ); // transmit error counter
+  if( ( tsr & CAN_TSR_TME ) == CAN_TSR_TME )
+    entry |= CAN_BUS_ERR_RX; // no mailbox pending, so not the transmitter
+
+  //- Store, then publish
+  can_dev.err_ring[head] = entry; // fill the free slot
+  __DMB(); // finish the slot before the main loop can see the new head
+  can_dev.err_head = next; // hand the slot to the main loop
+}
+
+/**
+ * @brief Take the bus error that raised the CAN error interrupt and queue it.
+ * @param[in] p_can Controller registers.
+ * @param[in] tsr   TSR as the interrupt began, telling the transmitter from a receiver.
+ * @note Runs in the CAN interrupt instead of the HAL's error handling, which takes longer per error than two errors are apart at 1 Mbit/s.
+ * @note Writing LEC 7 marks the code as taken; the next error overwrites it, so an interrupt from a state flag alone queues nothing.
+ */
+static inline void pcan_can_bus_error_take( CAN_TypeDef *p_can, uint32_t tsr )
+{
+  //- Acknowledge first, so an error arriving meanwhile raises the interrupt again
+  p_can->MSR = CAN_MSR_ERRI; // ERRI clears on a written 1, the other flags ignore a written 0
+  uint32_t esr = p_can->ESR; // last error code and both error counters
+  uint32_t lec = ( esr & CAN_ESR_LEC ) >> CAN_ESR_LEC_Pos; // code of the last error
+
+  //- Queue a new error and mark its code as taken
+  if( ( lec == 0u ) || ( lec == 7u ) )
+    return; // a state flag raised the interrupt, or the error was taken already
+  p_can->ESR = CAN_ESR_LEC; // LEC 7, the one value software may write; the other fields are read-only
+  pcan_can_bus_error_push( lec, esr, tsr ); // with its direction and the error counters
 }
 
 /**
@@ -586,10 +648,21 @@ void pcan_can_poll(void)
     can_dev.rx_tail = ( can_dev.rx_tail + 1u ) % CAN_RX_RING_SIZE; // release the slot
   }
 
+  //- Hand every queued bus error to the protocol, oldest first, while it takes them
+  uint32_t err_head = can_dev.err_head; // errors queued so far; later ones wait for the next poll
+  __DMB(); // read the slots only after seeing the head that published them
+  int (*bus_err_cb)( uint8_t, uint8_t, uint8_t ) = can_dev.bus_err_cb; // loaded once for the batch
+  for( uint32_t tail = can_dev.err_tail; tail != err_head; tail = ( tail + 1u ) & ( CAN_ERR_RING_SIZE - 1u ) )
+  {
+    uint32_t entry = can_dev.err_ring[tail]; // code, receive and transmit error counters
+    if( bus_err_cb && !bus_err_cb( (uint8_t)entry, (uint8_t)( entry >> 8 ), (uint8_t)( entry >> 16 ) ) )
+      break; // USB buffer full: the error stays queued for the next poll
+    can_dev.err_tail = ( tail + 1u ) & ( CAN_ERR_RING_SIZE - 1u ); // release the slot at once, so the interrupt can refill it
+  }
+
   //- Report the events the interrupt latched, with the controller's counters
   __disable_irq(); // fetch and clear without losing an event the interrupt adds meanwhile
   uint8_t errs = can_dev.isr_err; // events since the last poll
-  uint8_t bus_err = can_dev.isr_bus_err; // the last bus error among them
   can_dev.isr_err = 0; // start collecting again
   __enable_irq();
   if( errs && can_dev.can_err_cb )
@@ -597,7 +670,7 @@ void pcan_can_poll(void)
     can_bus_status_t status;
 
     pcan_can_get_bus_status( &status ); // read the controller's REC and TEC
-    can_dev.can_err_cb( errs, bus_err, status.rx_err, status.tx_err ); // report the events with the hardware counters
+    can_dev.can_err_cb( errs, status.rx_err, status.tx_err ); // report the events with the hardware counters
   }
 
   //- Start the mailboxes for frames queued while none was loaded
@@ -702,7 +775,7 @@ void HAL_CAN_ErrorCallback( CAN_HandleTypeDef *hcan )
     can_dev.isr_err |= CAN_ERROR_FLAG_RX_OVF; // the hardware RX FIFO dropped a frame
   }
 
-  //- Keep the last bus error for pcan_can_poll()
+  //- Queue a bus error the HAL took before pcan_can_bus_error_take() could
   //? The HAL clears ESR.LEC before this callback runs, so the error type comes from its error bits, listed here in CAN_LEC_* order from 1.
   static const uint32_t lec_errors[] = { HAL_CAN_ERROR_STF, HAL_CAN_ERROR_FOR, HAL_CAN_ERROR_ACK, HAL_CAN_ERROR_BR, HAL_CAN_ERROR_BD, HAL_CAN_ERROR_CRC };
   uint8_t lec = 0; // CAN_LEC_* code, 0 without a bus error
@@ -710,11 +783,7 @@ void HAL_CAN_ErrorCallback( CAN_HandleTypeDef *hcan )
     if( err & lec_errors[i] )
       lec = i + 1u; // the HAL reports one error type per event
   if( lec )
-  {
-    uint8_t receiving = ( ( hcan->Instance->TSR & CAN_TSR_TME ) == CAN_TSR_TME ); // no mailbox pending, so not the transmitter
-    can_dev.isr_bus_err = lec | ( receiving ? CAN_BUS_ERR_RX : 0 ); // overwritten by the next bus error
-    can_dev.isr_err |= CAN_ERROR_FLAG_BUS_ERR; // reported with the next poll
-  }
+    pcan_can_bus_error_push( lec, hcan->Instance->ESR, hcan->Instance->TSR ); // with its direction and the error counters
 
   HAL_CAN_ResetError( hcan );
 }
@@ -737,12 +806,17 @@ void CEC_CAN_IRQHandler( void )
   }
 
   //- Move the received frames into the ring
-  pcan_can_rx_fifo_drain( CAN_RX_FIFO0 ); // the filter routes every frame to FIFO 0
+  if( p_can->RF0R & CAN_RF0R_FMP0 )
+    pcan_can_rx_fifo_drain( CAN_RX_FIFO0 ); // the filter routes every frame to FIFO 0
+
+  //- Queue the bus error that raised the error interrupt
+  if( p_can->MSR & CAN_MSR_ERRI )
+    pcan_can_bus_error_take( p_can, tsr ); // the interrupt comes once per error, so every error gets its own entry
 
   //- Leave the rare events to the HAL
-  //? Aborts, failed attempts, FIFO overruns, FIFO 1 and error interrupts are rare, while the HAL's handler costs more than both paths above for every frame.
-  if( ( p_can->TSR & ( CAN_TSR_RQCP0 | CAN_TSR_RQCP1 | CAN_TSR_RQCP2 ) ) || ( p_can->RF0R & CAN_RF0R_FOVR0 ) || ( p_can->RF1R & ( CAN_RF1R_FMP1 | CAN_RF1R_FOVR1 ) ) || ( p_can->MSR & CAN_MSR_ERRI ) )
-    HAL_CAN_IRQHandler( &g_hcan ); // aborts, failed attempts, overruns, FIFO 1 and errors through the HAL callbacks
+  //? Aborts, failed attempts, FIFO overruns and FIFO 1 are rare, while the HAL's handler costs more than both paths above for every frame.
+  if( ( p_can->TSR & ( CAN_TSR_RQCP0 | CAN_TSR_RQCP1 | CAN_TSR_RQCP2 ) ) || ( p_can->RF0R & CAN_RF0R_FOVR0 ) || ( p_can->RF1R & ( CAN_RF1R_FMP1 | CAN_RF1R_FOVR1 ) ) )
+    HAL_CAN_IRQHandler( &g_hcan ); // aborts, failed attempts, overruns and FIFO 1 through the HAL callbacks
 
   //- Refill the mailboxes the completions freed
   pcan_can_flush_tx(); // load queued frames into free mailboxes
